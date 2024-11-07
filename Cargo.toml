@@ -21,6 +21,11 @@ name = "mp4_parser"
 path = "src/mp4_parser.rs"
 
 [dependencies]
+dash-mpd = "0.17.3"
+hls_m3u8 = { version = "0.4.2", features = ["backtrace"] }
+vast4-rs = "1.0.6"
+mp4 = "0.14.0"
+
 awc = { version = "3.5.1", features = ["rustls-0_23"] }
 actix = "0.13.5"
 actix-web = { version = "4.9.0", features = ["openssl"] }
@@ -51,7 +56,7 @@ rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = "0.3"
-tokio = { version = "1.24.2", features = ["sync", "io-util"] }
+tokio = { version = "1.41.1", features = ["sync", "io-util"] }
 tokio-util = "0.7.4"
 tokio-stream = { version = "0.1.3", features = ["sync"] }
 tracing = "0.1.30"
@@ -63,8 +68,4 @@ dashmap = "6.1.0"
 lazy_static = "1.5.0"
 webpki-roots = "0.26"
 mime = "0.3"
-
-dash-mpd = "0.17.3"
-hls_m3u8 = { version = "0.4.2", features = ["backtrace"] }
-vast4-rs = "1.0.6"
-mp4 = "0.14.0"
+async-lock = "3.4.0"

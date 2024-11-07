@@ -5,6 +5,7 @@ use utils::{
 };
 
 use actix_web::{error, middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
+use async_lock::RwLock;
 use awc::{http::header, Client, Connector};
 use clap::{Parser, ValueEnum};
 use dashmap::{DashMap, DashSet};
@@ -125,6 +126,9 @@ impl AvailableAdSlots {
         }
     }
 }
+
+#[derive(Clone, Default)]
+struct UserDefinedQueryParams(Arc<RwLock<String>>);
 
 #[derive(clap::Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -251,11 +255,12 @@ fn get_request_type(req: &HttpRequest, config: &web::Data<ServerConfig>) -> Requ
     }
 }
 
-fn build_ad_server_url(
+async fn build_ad_server_url(
     ad_server_url: &Url,
     interstitial_id: &str,
     user_id: &str,
     available_slots: &web::Data<AvailableAdSlots>,
+    user_defined_query_params: &web::Data<UserDefinedQueryParams>,
 ) -> Result<Url, Error> {
     let slot = available_slots
         .0
@@ -293,9 +298,20 @@ fn build_ad_server_url(
         .collect::<Vec<_>>()
         .join("&");
 
+    let user_defined_query_params = user_defined_query_params.0.read().await;
+    let full_queries = if user_defined_query_params.is_empty() {
+        transformed_queries
+    } else {
+        format!(
+            "{}&{}",
+            transformed_queries,
+            user_defined_query_params.as_str()
+        )
+    };
+
     // Clone the original URL and set the new query string
     let mut updated_ad_server_url = ad_server_url.clone();
-    updated_ad_server_url.set_query(Some(&transformed_queries));
+    updated_ad_server_url.set_query(Some(&full_queries));
 
     Ok(updated_ad_server_url)
 }
@@ -555,6 +571,7 @@ async fn handle_interstitials(
     available_ads: web::Data<AvailableAds>,
     available_slots: web::Data<AvailableAdSlots>,
     client: web::Data<Client>,
+    user_defined_query_params: web::Data<UserDefinedQueryParams>,
 ) -> Result<HttpResponse, Error> {
     let ad_server_url = ad_server_url.clone();
     let req_url = req.full_url();
@@ -570,7 +587,14 @@ async fn handle_interstitials(
     }
     log::info!("Received interstitial request from user {user_id} for slot {interstitial_id}");
 
-    let ad_url = build_ad_server_url(&ad_server_url, &interstitial_id, &user_id, &available_slots)?;
+    let ad_url = build_ad_server_url(
+        &ad_server_url,
+        &interstitial_id,
+        &user_id,
+        &available_slots,
+        &user_defined_query_params,
+    )
+    .await?;
     log::info!("Request ad pod with url {ad_url}");
 
     let mut res = client
@@ -641,12 +665,15 @@ async fn handle_media_stream(
     available_slots: web::Data<AvailableAdSlots>,
     config: web::Data<ServerConfig>,
     client: web::Data<Client>,
+    user_defined_query_params: web::Data<UserDefinedQueryParams>,
 ) -> Result<HttpResponse, Error> {
     log::trace!("Received request \n{:?}", req);
     let request_type = get_request_type(&req, &config);
 
     match request_type {
-        RequestType::MasterPlayList => handle_master_playlist(req, config, client).await,
+        RequestType::MasterPlayList => {
+            handle_master_playlist(req, config, client, user_defined_query_params).await
+        }
         RequestType::MediaPlayList => {
             handle_media_playlist(req, available_slots, config, client).await
         }
@@ -659,6 +686,7 @@ async fn handle_master_playlist(
     req: HttpRequest,
     config: web::Data<ServerConfig>,
     client: web::Data<Client>,
+    user_defined_query_params: web::Data<UserDefinedQueryParams>,
 ) -> Result<HttpResponse, Error> {
     let new_url = build_forward_url(&req, &config.forward_url);
 
@@ -669,6 +697,12 @@ async fn handle_master_playlist(
         .map_err(error::ErrorInternalServerError)?;
 
     let payload = res.body().await.map_err(error::ErrorInternalServerError)?;
+
+    // Save the user-defined query parameters for later use
+    if let Some(query_params) = req.uri().query() {
+        // NOTE: This will overwrite the query parameters from previous client
+        *user_defined_query_params.0.write().await = query_params.to_string();
+    }
 
     Ok(HttpResponse::Ok()
         .content_type("application/vnd.apple.mpegurl")
@@ -721,12 +755,16 @@ async fn handle_segment(
 
 async fn handle_status(
     config: web::Data<ServerConfig>,
+    ad_server_url: web::Data<Url>,
     available_ads: web::Data<AvailableAds>,
     available_slots: web::Data<AvailableAdSlots>,
+    user_defined_query_params: web::Data<UserDefinedQueryParams>,
 ) -> Result<HttpResponse, Error> {
     // Return the status of the server
     let response = object! {
         "config": config.to_json(),
+        "ad_server_url": ad_server_url.as_str(),
+        "user_defined_query_params": user_defined_query_params.0.read().await.to_string(),
         "available_ads": available_ads.to_json(),
         "available_slots": available_slots.to_json(),
     }
@@ -779,6 +817,7 @@ async fn main() -> io::Result<()> {
         playlist_path.to_string(),
         args.ad_insertion_mode,
     );
+    let user_defined_query_params = UserDefinedQueryParams::default();
     HttpServer::new(move || {
         let cors = actix_cors::Cors::permissive();
 
@@ -796,6 +835,7 @@ async fn main() -> io::Result<()> {
             .app_data(web::Data::new(available_ads.clone()))
             .app_data(web::Data::new(server_config.clone()))
             .app_data(web::Data::new(ad_server_url.clone()))
+            .app_data(web::Data::new(user_defined_query_params.clone()))
             .wrap(middleware::Logger::default())
             .wrap(cors)
             .route(COMMAND_PREFIX, web::get().to(handle_commands))
