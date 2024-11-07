@@ -12,6 +12,12 @@ pub fn get_all_linears_from_vast<'a>(vast: &'a vast4_rs::Vast<'a>) -> Vec<vast4_
                     .creatives
                     .iter()
                     .filter_map(|createve| createve.linear.clone())
+                    .filter(|linear| {
+                        let media_urls = get_media_urls_from_linear(linear);
+                        // Only return linears with mp4 media files.
+                        // This is a simple way to filter out bumpers (which end with '*_2023_P8_mp4').
+                        !media_urls.is_empty() && media_urls.first().unwrap().ends_with(".mp4")
+                    })
                     .collect::<Vec<_>>()
             })
         })
@@ -95,44 +101,10 @@ pub fn build_forward_url(req: &HttpRequest, forward_url: &Url) -> Url {
     new_url
 }
 
-pub fn build_advanced_ad_server_url(
-    server_url: &Url,
-    duration: u64,
-    _pod_num: u64,
-    user_id: &str,
-) -> Url {
-    let mut ad_url = server_url.clone();
-    ad_url
-        .query_pairs_mut()
-        .clear()
-        .append_pair("duration", &duration.to_string())
-        .append_pair("channelId", "20007")
-        .append_pair("userId", user_id)
-        .append_pair("deviceType", "stb")
-        .append_pair("os", "ios")
-        .append_pair("screenSize", "960x540")
-        .append_pair("geolocation", "176.71.21.0")
-        .append_pair("useg", "a50-54,p4714,gm")
-        .append_pair("adLimit", "0");
-
-    ad_url
-}
-
-pub fn build_test_ad_server_url(
-    server_url: &Url,
-    duration: u64,
-    pod_num: u64,
-    user_id: &str,
-) -> Url {
-    let mut ad_url = server_url.clone();
-    ad_url
-        .query_pairs_mut()
-        .append_pair("uid", user_id)
-        .append_pair("dur", &duration.to_string())
-        .append_pair("max", "5")
-        .append_pair("min", "5")
-        .append_pair("skip", "2")
-        .append_pair("pod", &pod_num.to_string());
-
-    ad_url
+pub fn get_query_param(req: &HttpRequest, key: &str) -> Option<String> {
+    req.uri().query().and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.to_string())
+    })
 }

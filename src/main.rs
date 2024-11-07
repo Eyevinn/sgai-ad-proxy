@@ -1,8 +1,7 @@
 mod utils;
 use utils::{
-    base_url, build_advanced_ad_server_url, build_forward_url, build_test_ad_server_url,
-    copy_headers, fixed_offset_to_local, get_all_linears_from_vast,
-    get_duration_and_media_urls_from_linear, rustls_config,
+    base_url, build_forward_url, copy_headers, fixed_offset_to_local, get_all_linears_from_vast,
+    get_duration_and_media_urls_from_linear, get_query_param, rustls_config,
 };
 
 use actix_web::{error, middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
@@ -14,6 +13,7 @@ use hls_m3u8::types::Value;
 use hls_m3u8::MediaPlaylist;
 use hls_m3u8::MediaSegment;
 use json::object;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io;
 use std::sync::Arc;
@@ -21,11 +21,16 @@ use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 
-const BUMPER_DURATION: u64 = 6;
-const DEFAULT_AD_DURATION: u64 = 10;
+const DEFAULT_AD_DURATION: u64 = 13;
+const DEFAULT_AD_NUMBER: i64 = 100;
 
+const STATUS_PREFIX: &str = "/status";
 const COMMAND_PREFIX: &str = "/command";
 const INTERSTITIAL_PLAYLIST: &str = "interstitials.m3u8";
+
+const SESSION_ID_TEMPLATE: &str = "[template.sessionId]";
+const DURATION_TEMPLATE: &str = "[template.duration]";
+const POD_NUM_TEMPLATE: &str = "[template.pod]";
 
 const HLS_INTERSTITIAL_ID: &str = "_HLS_interstitial_id";
 const HLS_PRIMARY_ID: &str = "_HLS_primary_id";
@@ -42,17 +47,85 @@ enum RequestType {
     MasterPlayList,
     MediaPlayList,
     Segment,
+    Other,
 }
 
 #[derive(Clone, Default)]
 struct Ad {
     duration: u64,
     url: String,
+    requested_at: chrono::DateTime<chrono::Local>,
 }
 
 #[derive(Clone, Default)]
 struct AvailableAds {
     linears: Arc<DashMap<Uuid, Ad>>,
+}
+
+impl AvailableAds {
+    fn to_json(&self) -> json::JsonValue {
+        let linears = self
+            .linears
+            .iter()
+            .map(|entry| {
+                let (id, ad) = entry.pair();
+                object! {
+                    "id": id.to_string(),
+                    "duration": ad.duration,
+                    "url": ad.url.clone(),
+                    "requested_at": ad.requested_at.to_rfc3339(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        object! {
+            "count": linears.len(),
+            "linears": linears,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AdSlot {
+    id: Uuid,
+    index: u64,
+    start_time: chrono::DateTime<chrono::Local>,
+    duration: u64,
+    pod_num: u64,
+}
+
+impl AdSlot {
+    fn name(&self) -> String {
+        format!("ad_slot{}", self.index)
+    }
+}
+
+#[derive(Clone, Default)]
+struct AvailableAdSlots(Arc<DashSet<AdSlot>>);
+
+impl AvailableAdSlots {
+    fn to_json(&self) -> json::JsonValue {
+        let mut slots = self
+            .0
+            .iter()
+            .map(|slot| {
+                object! {
+                    "id": slot.id.to_string(),
+                    "index": slot.index,
+                    "start_time": slot.start_time.to_rfc3339(),
+                    "duration": slot.duration,
+                    "pod_num": slot.pod_num,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        slots.sort_by(|a, b| a["index"].as_str().cmp(&b["index"].as_str()));
+
+        object! {
+            "count": slots.len(),
+            "slots": slots,
+        }
+    }
 }
 
 #[derive(clap::Parser, Debug)]
@@ -73,38 +146,17 @@ struct CliArguments {
     #[clap(verbatim_doc_comment)]
     ad_server_endpoint: String,
 
-    /// Ad server to use:
-    /// 1) default  - use default test ad server
-    /// 2) advanced - use custom ad server
-    #[clap(short, long, value_enum, verbatim_doc_comment, default_value_t = AdServerMode::Default)]
-    ad_server_mode: AdServerMode,
-
     /// Ad insertion mode to use:
     /// 1) static  - add intertistial every 30 seconds (100 in total).
     /// 2) dynamic - add intertistial when requested (Live Content only).
     #[clap(short, long, value_enum, verbatim_doc_comment, default_value_t = InsertionMode::Static)]
-    insertion_mode: InsertionMode,
+    ad_insertion_mode: InsertionMode,
 
     /// Base URL for interstitals (protocol://ip:port)
     /// If not provided, the server will use 'localhost' and the 'listen port' as the base URL
     /// e.g., http://localhost:${LISTEN_PORT}
-    #[clap(long, verbatim_doc_comment, default_value_t = String::from(""))]
+    #[clap(short, long, verbatim_doc_comment, default_value_t = String::from(""))]
     interstitals_address: String,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-pub enum AdServerMode {
-    Default,
-    Advanced,
-}
-
-impl AdServerMode {
-    pub fn to_str(&self) -> &str {
-        match self {
-            AdServerMode::Default => "default",
-            AdServerMode::Advanced => "advanced",
-        }
-    }
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -128,7 +180,6 @@ struct ServerConfig {
     interstitials_address: Url,
     master_playlist_path: String,
     insertion_mode: InsertionMode,
-    ad_server_mode: AdServerMode,
 }
 
 impl ServerConfig {
@@ -137,14 +188,21 @@ impl ServerConfig {
         interstitials_address: Url,
         master_playlist_path: String,
         insertion_mode: InsertionMode,
-        ad_server_mode: AdServerMode,
     ) -> Self {
         Self {
             forward_url,
             interstitials_address,
             master_playlist_path,
             insertion_mode,
-            ad_server_mode,
+        }
+    }
+
+    fn to_json(&self) -> json::JsonValue {
+        object! {
+            "forward_url": self.forward_url.as_str(),
+            "interstitials_address": self.interstitials_address.as_str(),
+            "master_playlist_path": self.master_playlist_path.clone(),
+            "insertion_mode": self.insertion_mode.to_str(),
         }
     }
 }
@@ -155,24 +213,6 @@ struct InsertionCommand {
     duration: u64,
     pod_num: u64,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AdSlot {
-    id: Uuid,
-    index: u64,
-    start_time: chrono::DateTime<chrono::Local>,
-    duration: u64,
-    pod_num: u64,
-}
-
-impl AdSlot {
-    fn name(&self) -> String {
-        format!("ad_slot{}", self.index)
-    }
-}
-
-#[derive(Clone, Default)]
-struct AvailableAdSlots(Arc<DashSet<AdSlot>>);
 
 impl InsertionCommand {
     fn from_query(query: &str) -> Result<Self, String> {
@@ -206,24 +246,17 @@ fn get_request_type(req: &HttpRequest, config: &web::Data<ServerConfig>) -> Requ
         return RequestType::MasterPlayList;
     } else if path.contains(".ts") || path.contains(".cmf") || path.contains(".mp") {
         return RequestType::Segment;
-    } else {
+    } else if path.contains(".m3u8") {
         return RequestType::MediaPlayList;
+    } else {
+        return RequestType::Other;
     }
-}
-
-fn get_query_param(req: &HttpRequest, key: &str) -> Option<String> {
-    req.uri().query().and_then(|query| {
-        url::form_urlencoded::parse(query.as_bytes())
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.to_string())
-    })
 }
 
 fn build_ad_server_url(
     ad_server_url: &Url,
     interstitial_id: &str,
     user_id: &str,
-    config: &web::Data<ServerConfig>,
     available_slots: &web::Data<AvailableAdSlots>,
 ) -> Result<Url, Error> {
     let slot = available_slots
@@ -232,19 +265,41 @@ fn build_ad_server_url(
         .find(|slot| slot.name() == interstitial_id)
         .ok_or_else(|| error::ErrorNotFound("Ad slot missing".to_string()))?;
 
-    let ad_url = match config.ad_server_mode {
-        AdServerMode::Default => {
-            build_test_ad_server_url(ad_server_url, slot.duration, slot.pod_num, user_id)
-        }
-        AdServerMode::Advanced => build_advanced_ad_server_url(
-            ad_server_url,
-            slot.duration + BUMPER_DURATION,
-            slot.pod_num,
-            user_id,
-        ),
-    };
+    // Create a map of query templates to replace in the ad_server_url
+    let duration_str = slot.duration.to_string();
+    let pod_num_str = slot.pod_num.to_string();
+    let query_templates: HashMap<&str, &str> = [
+        (SESSION_ID_TEMPLATE, user_id),
+        (DURATION_TEMPLATE, &duration_str),
+        (POD_NUM_TEMPLATE, &pod_num_str),
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
-    Ok(ad_url)
+    // Extract and transform query parameters from the ad_server_url
+    let transformed_queries: String = ad_server_url
+        .query_pairs()
+        .map(|(key, value)| {
+            // Check if the value matches any template in query_templates
+            let new_value = if let Some(&matched_value) = query_templates.get(value.as_ref()) {
+                // Use the matched value if a template is found
+                matched_value.to_string()
+            } else {
+                // Otherwise, use the original value
+                value.into_owned()
+            };
+
+            format!("{}={}", key, new_value)
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+
+    // Clone the original URL and set the new query string
+    let mut updated_ad_server_url = ad_server_url.clone();
+    updated_ad_server_url.set_query(Some(&transformed_queries));
+
+    Ok(updated_ad_server_url)
 }
 
 fn build_ad_response(
@@ -252,16 +307,10 @@ fn build_ad_response(
     req_url: Url,
     interstitial_id: &str,
     user_id: &str,
-    config: &web::Data<ServerConfig>,
     available_ads: web::Data<AvailableAds>,
 ) -> String {
-    let mut linears = get_all_linears_from_vast(&vast);
-    // FIX: This is a temporary way to skip the first and last bumper ads
-    // As they are fMP4 and require special handling
-    if config.ad_server_mode == AdServerMode::Advanced && linears.len() >= 3 {
-        linears = linears[1..linears.len() - 1].to_vec();
-    }
-
+    // Get all linears (regular MP4s) from the VAST
+    let linears = get_all_linears_from_vast(&vast);
     let mut accumulated_duration = 0;
     let assets = linears
         .iter()
@@ -271,8 +320,11 @@ fn build_ad_response(
             let ad = Ad {
                 duration,
                 url: urls.first().unwrap().clone(),
+                requested_at: chrono::Local::now(),
             };
+            // Transform the linears into ads and save them for follow-up requests
             available_ads.linears.insert(linear_id, ad);
+
             let start_offset = accumulated_duration;
             accumulated_duration += duration;
 
@@ -325,6 +377,11 @@ fn insert_interstitials(
         .is_some_and(|t| t == hls_m3u8::types::PlaylistType::Vod);
     let is_dynamic = *ad_insert_mode == InsertionMode::Dynamic;
 
+    if is_vod && is_dynamic {
+        log::error!("Dynamic ad insertion is not supported for VOD streams.");
+        return;
+    }
+
     // Take the first program date time as the start for VOD stream
     // Or the start time of the server for Live stream
     let init_program_date_time = if is_vod {
@@ -334,7 +391,7 @@ fn insert_interstitials(
     };
 
     // Generate ad slot every half a minute for static mode by default
-    let fixed_ad_slots: Vec<AdSlot> = (1..100)
+    let fixed_ad_slots: Vec<AdSlot> = (1..DEFAULT_AD_NUMBER)
         .map(|i| {
             let seconds = i * 30;
             let start_time = init_program_date_time + chrono::Duration::seconds(seconds);
@@ -478,14 +535,18 @@ async fn handle_commands(
                     "pod_num": command.pod_num,
                 }
             };
-            Ok(HttpResponse::Ok().json(response.dump()))
+            Ok(HttpResponse::Ok()
+                .content_type(mime::APPLICATION_JSON)
+                .body(response.pretty(2)))
         }
         Err(err) => {
             let response = object! {
                 status: "error",
                 message: err
             };
-            Ok(HttpResponse::BadRequest().json(response.dump()))
+            Ok(HttpResponse::BadRequest()
+                .content_type(mime::APPLICATION_JSON)
+                .body(response.pretty(2)))
         }
     }
 }
@@ -495,7 +556,6 @@ async fn handle_interstitials(
     ad_server_url: web::Data<Url>,
     available_ads: web::Data<AvailableAds>,
     available_slots: web::Data<AvailableAdSlots>,
-    config: web::Data<ServerConfig>,
     client: web::Data<Client>,
 ) -> Result<HttpResponse, Error> {
     let ad_server_url = ad_server_url.clone();
@@ -512,13 +572,7 @@ async fn handle_interstitials(
     }
     log::info!("Received interstitial request from user {user_id} for slot {interstitial_id}");
 
-    let ad_url = build_ad_server_url(
-        &ad_server_url,
-        &interstitial_id,
-        &user_id,
-        &config,
-        &available_slots,
-    )?;
+    let ad_url = build_ad_server_url(&ad_server_url, &interstitial_id, &user_id, &available_slots)?;
     log::info!("Request ad pod with url {ad_url}");
 
     let mut res = client
@@ -537,14 +591,7 @@ async fn handle_interstitials(
         // Return an empty VAST in case of parsing error
         .unwrap_or_default();
 
-    let response = build_ad_response(
-        vast,
-        req_url,
-        &interstitial_id,
-        &user_id,
-        &config,
-        available_ads,
-    );
+    let response = build_ad_response(vast, req_url, &interstitial_id, &user_id, available_ads);
     log::info!("asset json reply \n{response}");
 
     Ok(HttpResponse::Ok()
@@ -574,19 +621,21 @@ async fn handle_follow_up_request(
         .build()
         .unwrap();
 
+    // Wrap the MP4 in a media playlist
     let m3u8 = MediaPlaylist::builder()
         .media_sequence(0)
         .target_duration(Duration::from_secs(linear.duration))
         .segments(vec![segment])
         .has_end_list(true)
         .build()
+        .inspect(|m3u8| {
+            log::debug!("m3u8 \n{m3u8}");
+        })
         .unwrap();
 
-    let mut client_resp = HttpResponse::build(actix_web::http::StatusCode::OK);
-    client_resp.insert_header(("content-type", "application/vnd.apple.mpegurl"));
-    log::debug!("m3u8 \n{m3u8}");
-
-    Ok(client_resp.body(m3u8.to_string()))
+    Ok(HttpResponse::Ok()
+        .content_type("application/vnd.apple.mpegurl")
+        .body(m3u8.to_string()))
 }
 
 async fn handle_media_stream(
@@ -604,6 +653,7 @@ async fn handle_media_stream(
             handle_media_playlist(req, available_slots, config, client).await
         }
         RequestType::Segment => handle_segment(req, config, client).await,
+        RequestType::Other => Ok(HttpResponse::NotFound().finish()),
     }
 }
 
@@ -646,7 +696,7 @@ async fn handle_media_playlist(
     let mut m3u8 = MediaPlaylist::try_from(manifest).unwrap();
 
     insert_interstitials(&mut m3u8, &config, available_slots);
-    log::info!("m3u8 \n{m3u8}");
+    log::debug!("m3u8 \n{m3u8}");
 
     Ok(HttpResponse::Ok()
         .content_type("application/vnd.apple.mpegurl")
@@ -669,6 +719,24 @@ async fn handle_segment(
     copy_headers(&res, &mut client_resp);
 
     Ok(client_resp.streaming(res))
+}
+
+async fn handle_status(
+    config: web::Data<ServerConfig>,
+    available_ads: web::Data<AvailableAds>,
+    available_slots: web::Data<AvailableAdSlots>,
+) -> Result<HttpResponse, Error> {
+    // Return the status of the server
+    let response = object! {
+        "config": config.to_json(),
+        "available_ads": available_ads.to_json(),
+        "available_slots": available_slots.to_json(),
+    }
+    .pretty(2);
+
+    Ok(HttpResponse::Ok()
+        .content_type(mime::APPLICATION_JSON)
+        .body(response))
 }
 
 #[actix_web::main]
@@ -700,9 +768,8 @@ async fn main() -> io::Result<()> {
     log::info!("Program started at: {:?}", *START_TIME);
     log::info!("Starting HTTP server at {listen_url}, fowarding to {forward_url}, interstials' base URL: {interstitials_address}");
     log::info!(
-        "Ad server endpoint: {ad_server_url}, {:?} mode, {:?} insertion",
-        args.ad_server_mode.to_str(),
-        args.insertion_mode.to_str()
+        "Ad server endpoint: {ad_server_url}, {:?} insertion",
+        args.ad_insertion_mode.to_str()
     );
 
     let client_tls_config = Arc::new(rustls_config());
@@ -712,8 +779,7 @@ async fn main() -> io::Result<()> {
         forward_url,
         interstitials_address,
         playlist_path.to_string(),
-        args.insertion_mode,
-        args.ad_server_mode,
+        args.ad_insertion_mode,
     );
     HttpServer::new(move || {
         let cors = actix_cors::Cors::permissive();
@@ -735,6 +801,7 @@ async fn main() -> io::Result<()> {
             .wrap(middleware::Logger::default())
             .wrap(cors)
             .route(COMMAND_PREFIX, web::get().to(handle_commands))
+            .route(STATUS_PREFIX, web::get().to(handle_status))
             .route(INTERSTITIAL_PLAYLIST, web::get().to(handle_interstitials))
             .default_service(web::to(handle_media_stream))
     })
