@@ -40,11 +40,14 @@ For example, one test ad server is available at <https://eyevinn-sgai.eyevinn-te
 ### Run
 
 ```bash
-# Start the ad-proxy server on port 3333 with the origin HLS stream (http://localhost:8001/loop/master.m3u8) and test ad server
-# Use dynamic mode to insert ads into the HLS Live stream at specified timepoints
-# Use http://localhost:3333 as the base URL for interstitals (by default)
+# Start the ad-proxy server on port 3333 with the origin HLS stream at http://localhost:8001/loop/master.m3u8
+# 1. Use test ad server at https://eyevinn-sgai.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/vast with query parameters dur, uid, ps, min, and max
+# Here the [template.*] will be replaced with the actual values before sending the request to the ad server while the rest will be passed as is
+# 2. Use dynamic mode to insert ads into the HLS Live stream at specified timepoints
+# 3. Use http://localhost:3333 as the base URL for interstitals (by default)
 cargo run --bin ad_proxy 127.0.0.1 3333 http://localhost:8001/test/master.m3u8 \
-https://eyevinn-sgai.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/vast -i dynamic
+https://eyevinn-sgai.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/vast?dur=[template.duration]&uid=[template.sessionId]&ps=[template.pod]&min=5&max=5 \
+--ad-insertion-mode dynamic
 
 # Now you can access the HLS Live stream at http://127.0.0.1:3333/test/master.m3u8
 # NOTE: Each proxy server instance can only handle one HLS Live stream at a time and restart is required to switch streams
@@ -64,18 +67,14 @@ Arguments:
                          It should be a VAST4.0/4.1 XML compatible endpoint
 
 Options:
-  -a, --ad-server-mode <AD_SERVER_MODE>
-          Ad server to use:
-          1) default  - use default test ad server
-          2) advanced - use custom ad server [default: default] [possible values: default, advanced]
-  -i, --insertion-mode <INSERTION_MODE>
+  -a, --ad-insertion-mode <AD_INSERTION_MODE>
           Ad insertion mode to use:
           1) static  - add intertistial every 30 seconds (100 in total).
           2) dynamic - add intertistial when requested (Live Content only). [default: static] [possible values: static, dynamic]
-      --interstitals-address <INTERSTITALS_ADDRESS>
+  -i, --interstitals-address <INTERSTITALS_ADDRESS>
           Base URL for interstitals (protocol://ip:port)
           If not provided, the server will use 'localhost' and the 'listen port' as the base URL
-          e.g., http://localhost:${LISTEN_PORT}
+          e.g., http://localhost:${LISTEN_PORT} [default: ]
 ```
 
 ### Insert Ads
@@ -90,6 +89,12 @@ For example, to insert an ad break at 5 seconds from the live-edge with a durati
 
 ```bash
 curl http://127.0.0.1:3333/command?in=5&dur=10&pod=2
+```
+
+It is also possible to check the status of the proxy server by sending a GET request:  
+
+```bash
+curl http://127.0.0.1:3333/status
 ```
 
 ### Example Modified Media Playlist
