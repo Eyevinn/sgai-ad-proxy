@@ -105,7 +105,7 @@ struct AvailableAdSlots(Arc<DashSet<AdSlot>>);
 
 impl AvailableAdSlots {
     fn to_json(&self) -> json::JsonValue {
-        let mut slots = self
+        let slots = self
             .0
             .iter()
             .map(|slot| {
@@ -118,8 +118,6 @@ impl AvailableAdSlots {
                 }
             })
             .collect::<Vec<_>>();
-
-        slots.sort_by(|a, b| a["index"].as_str().cmp(&b["index"].as_str()));
 
         object! {
             "count": slots.len(),
