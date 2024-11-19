@@ -76,6 +76,18 @@ pub fn fixed_offset_to_local(
     date.with_timezone(&chrono::Local)
 }
 
+pub fn parse_date_time(
+    date_time: &str,
+) -> chrono::ParseResult<chrono::DateTime<chrono::FixedOffset>> {
+    let default_date_time_format = "%Y-%m-%dT%H:%M:%S%.3f%z";
+
+    let date_time = chrono::DateTime::parse_from_rfc3339(date_time)
+        .or_else(|_| chrono::DateTime::parse_from_rfc2822(date_time))
+        .or_else(|_| chrono::DateTime::parse_from_str(date_time, default_date_time_format));
+
+    date_time
+}
+
 /// Create simple rustls client config from root certificates.
 pub fn rustls_config() -> ClientConfig {
     rustls::crypto::aws_lc_rs::default_provider()
