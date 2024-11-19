@@ -167,7 +167,8 @@ fileSequence18.ts
 
 ## Limitations
 
-* In order to place the interstitials at the correct timepoints, the origin media playlist must contain the `EXT-X-PROGRAM-DATE-TIME` tag. Otherwise, no interstitials will be inserted (the origin media playlist will be returned).
+* In order to place the interstitials at the correct timepoints, the origin media playlist should contain the `EXT-X-PROGRAM-DATE-TIME` tag. For Live stream, the origin media playlist will be returned
+if this tag is not found so no interstitials will be inserted. For VoD, the proxy server will try to use its starting time as reference if the `EXT-X-PROGRAM-DATE-TIME` tag is not found.
 * The creatives from ad server are mostly regular MPEG-4 files (ftyp+moov+mdat). While AVPlayer can handle regular MP4 files, other video player like hls.js can only handle fragmented MPEG-4 files (ftyp+moov+moof+mdat+moof+mdat+…). Therefore, it would fail to play out the interstitials.
 Ideally, raw MP4 creatives should be transcoded to fMP4 or TS files first. One can do that manually or use the [encore](https://github.com/svt/encore) to transocde them into HLS stream and store the URL in a CouchDB instance.
 * Joining the live stream during an ad break might pause the playback until the ad break is over.
