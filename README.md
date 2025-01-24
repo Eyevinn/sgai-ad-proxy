@@ -29,8 +29,7 @@ python -m http.server 8001
 # Now you can access the HLS stream at http://127.0.0.1:8001/test/master.m3u8
 ```
 
-* A running instance of the [ad-server](https://github.com/Eyevinn/test-adserver).
-For example, one test ad server is available at <https://eyevinn-sgai.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/vast>
+* A running instance of the [ad-server](https://github.com/Eyevinn/test-adserver) OR [ad-normalizer](https://github.com/Eyevinn/ad-normalizer).
 
 * QuickTime Player or any other video player (e.g., AVPlayer, [HLS.js v1.6.0](https://hlsjs-dev.video-dev.org/demo)) that supports Server Guided Ad Insertion (SGAI).
 
@@ -39,19 +38,17 @@ For example, one test ad server is available at <https://eyevinn-sgai.eyevinn-te
 # you can play the proxied HLS stream
 ```
 
-* (Optional) [CouchDB](https://docs.couchdb.org/en/latest/index.html) [instance](https://eyevinn-sgai.apache-couchdb.auto.prod.osaas.io) to store transcoded ads. With this, the ad-proxy server can fetch the ads' URL from a custom instance and use that in the JSON response for interstitials.
-
 ### Run
 
 ```bash
 # Start the ad-proxy server on port 3333 with the origin HLS stream at http://localhost:8001/loop/master.m3u8
-# 1. Use test ad server at https://eyevinn-sgai.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/vast with query parameters dur, uid, ps, min, and max
+# 1. Use ad normalizer at https://eyevinnlab-demo.eyevinn-ad-normalizer.auto.prod.osaas.io/api/v1/vast with query parameters dur, uid, ps, min, and max
 # Here the [template.*] will be replaced with the actual values before sending the request to the ad server while the rest will be passed as is
-# 2. Use dynamic mode to insert ads into the HLS Live stream at specified timepoints
+# 2. Use static mode to insert ads into the HLS Live stream at specified timepoints
 # 3. Use http://localhost:3333 as the base URL for interstitials (by default)
 cargo run --bin ad_proxy 127.0.0.1 3333 http://localhost:8001/test/master.m3u8 \
-https://eyevinn-sgai.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/vast?dur=[template.duration]&uid=[template.sessionId]&ps=[template.pod]&min=5&max=5 \
---ad-insertion-mode dynamic
+https://eyevinnlab-demo.eyevinn-ad-normalizer.auto.prod.osaas.io/api/v1/vast?dur=[template.duration]&uid=[template.sessionId]&ps=[template.pod]&min=5&max=5 \
+--ad-insertion-mode static
 
 # Now you can access the HLS Live stream at http://127.0.0.1:3333/test/master.m3u8
 # NOTE: Each proxy server instance can only handle one HLS Live stream at a time and restart is required to switch streams
@@ -66,7 +63,7 @@ Arguments:
   <LISTEN_ADDR>          Proxy address (ip)
   <LISTEN_PORT>          Proxy port
   <MASTER_PLAYLIST_URL>  HLS stream address (protocol://ip:port/path)
-                         e.g., http://localhost/test/master.m3u8)
+                         (e.g., http://localhost/test/master.m3u8)
   <AD_SERVER_ENDPOINT>   Ad server endpoint (protocol://ip:port/path)
                          It should be a VAST4.0/4.1 XML compatible endpoint
 
@@ -79,17 +76,17 @@ Options:
           Base URL for interstitials (protocol://ip:port)
           If not provided, the server will use 'localhost' and the 'listen port' as the base URL
           e.g., http://localhost:${LISTEN_PORT} [default: ]
-      --couchdb-endpoint <COUCHDB_ENDPOINT>
-          CouchDB endpoint (protocol://ip:port)
-          If provided, the server will connect to the CouchDB instance to fetch transcoded ads
-          'COUCHDB_USER' and 'COUCHDB_PASSWORD' environment variables should be set for authentication [default: ]
-      --couchdb-table <COUCHDB_TABLE>
-          CouchDB table name [default: transcoded_test_ads]
+      --default-ad-duration <DEFAULT_AD_DURATION>
+          Default ad break duration in seconds [default: 13]
+      --default-repeating-cycle <DEFAULT_REPEATING_CYCLE>
+          Repeat the ad break every 'n' seconds [default: 30]
+      --default-ad-number <DEFAULT_AD_NUMBER>
+          Default number of ad slots to generate [default: 100]
 ```
 
-### Insert Ads
+### Insert Ads dynamically
 
-One can insert ads into the video stream by sending a GET request to the ad-proxy server with the following query parameters:
+One can run the ad-proxy in *dynamic* mode and then insert ads into the video stream by sending a GET request with the following query parameters:
 
 * in - the time in seconds when the ad break should be inserted
 * duration - the duration of the ad break in seconds
@@ -152,17 +149,17 @@ fileSequence18.ts
 
 ``` json
 {
-   "ASSETS":[
+   "ASSETS": [
       {
-         "URI":"http://localhost:3333/interstitials.m3u8?_HLS_interstitial_id=ad_slot0&_HLS_primary_id=40FE1829-438E-49B0-8B3A-A285DD4A8154&_HLS_follow_id=361434bf-05e7-4e17-83ca-690452e1cb33",
-         "DURATION":5
+         "URI": "https:/eyevinnlab-adnormalizer.minio-minio.auto.prod.osaas.io/adassets/AAA2FDDDD1232F1/777f6929-ce6f-4712-82d9-aba2da6fd5c2/index.m3u8",
+         "DURATION": 15
       },
       {
-         "URI":"http://localhost:3333/interstitials.m3u8?_HLS_interstitial_id=ad_slot0&_HLS_primary_id=40FE1829-438E-49B0-8B3A-A285DD4A8154&_HLS_follow_id=eb805a34-1d61-4217-9632-deab8790c30d",
-         "DURATION":5
+         "URI": "https:/eyevinnlab-adnormalizer.minio-minio.auto.prod.osaas.io/adassets/AAA2FCCCC1232F2/e4ba2aff-a0e0-409b-a841-85b53d8ea84f/index.m3u8",
+         "DURATION": 15
       }
    ]
-}
+   }
 ```
 
 ## Limitations
@@ -170,7 +167,7 @@ fileSequence18.ts
 * In order to place the interstitials at the correct timepoints, the origin media playlist should contain the `EXT-X-PROGRAM-DATE-TIME` tag. For Live stream, the origin media playlist will be returned
 if this tag is not found so no interstitials will be inserted. For VoD, the proxy server will try to use its starting time as reference if the `EXT-X-PROGRAM-DATE-TIME` tag is not found.
 * The creatives from ad server are mostly regular MPEG-4 files (ftyp+moov+mdat). While AVPlayer can handle regular MP4 files, other video player like hls.js can only handle fragmented MPEG-4 files (ftyp+moov+moof+mdat+moof+mdat+…). Therefore, it would fail to play out the interstitials.
-Ideally, raw MP4 creatives should be transcoded to fMP4 or TS files first. One can do that manually or use the [Encore](https://github.com/svt/encore) to transocde them into HLS stream and store the URL in a CouchDB instance.
+Ideally, raw MP4 creatives should be transcoded to fMP4 or TS files first. One can use the [Encore](https://github.com/svt/encore) to transocde them into HLS stream or use the [Ad Normalizer](https://app.osaas.io/dashboard/service/eyevinn-ad-normalizer) to fetch transcoded creatives directly.
 * When a client joins the live stream during an ad break, it should append the request with *_HLS_start_offset* query parameter to indicate the offset in seconds of the playback start point from the beginning of the interstitial. One can use this to customize interstitial content based on the starting offset.
 * The proxy server can only handle one HLS stream at a time. To switch streams, the server must be restarted.
 

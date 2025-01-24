@@ -24,7 +24,7 @@ name = "mp4_parser"
 path = "src/mp4_parser.rs"
 
 [dependencies]
-dash-mpd = "0.17.3"
+dash-mpd = "0.18.0"
 hls_m3u8 = { version = "0.4.2", features = ["backtrace"] }
 vast4-rs = "1.0.6"
 mp4 = "0.14.0"
@@ -35,8 +35,8 @@ actix-web = { version = "4.9.0", features = ["openssl"] }
 actix-http = "3.9.0"
 actix-cors = "0.7.0"
 
-clap = { version = "4.5.21", features = ["derive"] }
-chrono = { version = "0.4.30", features = ["serde"] }
+clap = { version = "4.5.27", features = ["derive"] }
+chrono = { version = "0.4.39", features = ["serde"] }
 # derive_more = "1.0.0"
 dotenvy = "0.15"
 env_logger = "0.11"
@@ -45,30 +45,29 @@ eyre = { version = "0.6", default-features = false, features = [
     "track-caller",
 ] }
 color-eyre = "0.6"
-futures-util = { version = "0.3.17", default-features = false, features = [
+futures-util = { version = "0.3.31", default-features = false, features = [
     "std",
 ] }
 log = "0.4"
-openssl = { version = "0.10.60", features = ["v110"] }
+openssl = { version = "0.10.68", features = ["v110"] }
 parking_lot = "0.12"
-pin-project-lite = "0.2.15"
+pin-project-lite = "0.2.16"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-rustls = "0.23.17"
+rustls = "0.23.21"
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 time = "0.3"
-tokio = { version = "1.41.1", features = ["sync", "io-util"] }
-tokio-util = "0.7.4"
-tokio-stream = { version = "0.1.3", features = ["sync"] }
-tracing = "0.1.30"
+tokio = { version = "1.43.0", features = ["sync", "io-util"] }
+tokio-util = "0.7.13"
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1.6", features = ["v4", "v7", "serde"] }
-url = "2.5.3"
+uuid = { version = "1.12", features = ["v4", "v7", "serde"] }
+url = "2.5.4"
 json = "0.12.4"
 dashmap = "6.1.0"
 lazy_static = "1.5.0"
 webpki-roots = "0.26"
 mime = "0.3"
-couch_rs = "0.11"

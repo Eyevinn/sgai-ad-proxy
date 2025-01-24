@@ -15,8 +15,9 @@ pub fn get_all_creatives_from_vast<'a>(
         .collect::<Vec<_>>()
 }
 
-pub fn get_valid_creatives<'a>(
+pub fn filter_creatives_by<'a>(
     creatives: Vec<&'a vast4_rs::Creative<'a>>,
+    filter: impl Fn(&str) -> bool,
 ) -> Vec<&'a vast4_rs::Creative<'a>> {
     creatives
         .into_iter()
@@ -26,15 +27,34 @@ pub fn get_valid_creatives<'a>(
             let media_urls = get_media_urls_from_linear(creative.linear.as_ref().unwrap());
             // Only return linears with valid media files.
             // This is a simple way to filter out bumpers (which end with '*_2023_P8_mp4').
-            !media_urls.is_empty() && is_media_segment(media_urls.first().unwrap())
+            !media_urls.is_empty() && filter(media_urls.first().unwrap())
         })
         .collect::<Vec<_>>()
 }
 
-pub fn get_all_valid_creatives_from_vast<'a>(
+pub fn get_all_raw_creatives_from_vast<'a>(
     vast: &'a vast4_rs::Vast<'a>,
 ) -> Vec<&'a vast4_rs::Creative<'a>> {
-    get_valid_creatives(get_all_creatives_from_vast(vast))
+    filter_creatives_by(get_all_creatives_from_vast(vast), is_media_segment)
+}
+
+pub fn get_all_transcoded_creatives_from_vast<'a>(
+    vast: &'a vast4_rs::Vast<'a>,
+) -> Vec<&'a vast4_rs::Creative<'a>> {
+    filter_creatives_by(
+        get_all_creatives_from_vast(vast),
+        is_transcoded_media_segment,
+    )
+}
+
+pub fn get_id_from_creative(creative: &vast4_rs::Creative) -> String {
+    creative
+        // Use the UniversalAdId if available, otherwise use the ad_id
+        .universal_ad_id
+        .first()
+        .map(|id| id.id.clone())
+        .unwrap_or(creative.ad_id.as_deref().unwrap_or("unknown").into())
+        .into_owned()
 }
 
 pub fn get_duration_from_linear(linear: &vast4_rs::Linear) -> u64 {
@@ -130,6 +150,10 @@ pub fn calculate_expected_program_date_time_list(
 
 pub fn is_media_segment(path: &str) -> bool {
     path.contains(".ts") || path.contains(".cmf") || path.contains(".mp") || path.contains(".m4s")
+}
+
+pub fn is_transcoded_media_segment(path: &str) -> bool {
+    path.contains(".m3u8")
 }
 
 pub fn fixed_offset_to_local(

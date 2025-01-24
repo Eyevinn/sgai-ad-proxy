@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VAST version="4.0">
+  <Ad id="POD_AD-ID_001" sequence="1">
+    <InLine>
+      <Impression id="IMPRESSION-ID_001">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_1&amp;progress=vast</Impression>
+      <AdSystem>Test Adserver</AdSystem>
+      <AdTitle>Ad That Test-Adserver Wants Player To See #1</AdTitle>
+      <Creatives>
+        <Creative id="CRETIVE-ID_001" adId="alvedon-10s" sequence="1">
+          <UniversalAdId idRegistry="test-ad-id.eyevinn" idValue="AAA%2FBBBB123%2F1">AAA%2FBBBB123%2F1</UniversalAdId>
+          <Linear>
+            <TrackingEvents>
+              <Tracking event="start">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_1&amp;progress=0</Tracking>
+              <Tracking event="firstQuartile">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_1&amp;progress=25</Tracking>
+              <Tracking event="midpoint">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_1&amp;progress=50</Tracking>
+              <Tracking event="thirdQuartile">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_1&amp;progress=75</Tracking>
+              <Tracking event="complete">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_1&amp;progress=100</Tracking>
+            </TrackingEvents>
+            <VideoClicks>
+              <ClickThrough id="Eyevinn Test AdServer">https://github.com/Eyevinn/test-adserver</ClickThrough>
+            </VideoClicks>
+            <Duration>00:00:10</Duration>
+            <MediaFiles>
+              <MediaFile width="718" height="404" codec="H.264" delivery="progressive" type="application/x-mpegURL" bitrate="1300">https:/eyevinnlab-adnormalizer.minio-minio.auto.prod.osaas.io/adassets/AAA2FBBBB1232F1/7c0bd98e-20ff-43ff-bc5a-e1cd0491d94c/index.m3u8</MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+  <Ad id="POD_AD-ID_002" sequence="2">
+    <InLine>
+      <Impression id="IMPRESSION-ID_002">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_2&amp;progress=vast</Impression>
+      <AdSystem>Test Adserver</AdSystem>
+      <AdTitle>Ad That Test-Adserver Wants Player To See #2</AdTitle>
+      <Creatives>
+        <Creative id="CRETIVE-ID_002" adId="alvedon-10s" sequence="2">
+          <UniversalAdId idRegistry="test-ad-id.eyevinn" idValue="AAA%2FBBBB123%2F2">AAA%2FBBBB123%2F2</UniversalAdId>
+          <Linear>
+            <TrackingEvents>
+              <Tracking event="start">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_2&amp;progress=0</Tracking>
+              <Tracking event="firstQuartile">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_2&amp;progress=25</Tracking>
+              <Tracking event="midpoint">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_2&amp;progress=50</Tracking>
+              <Tracking event="thirdQuartile">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_2&amp;progress=75</Tracking>
+              <Tracking event="complete">http://eyevinnlab-adnormalizer.eyevinn-test-adserver.auto.prod.osaas.io/api/v1/sessions/79a460e8-7d0c-429d-80f7-6a9cac6a0572/tracking?adId=alvedon-10s_2&amp;progress=100</Tracking>
+            </TrackingEvents>
+            <VideoClicks>
+              <ClickThrough id="Eyevinn Test AdServer">https://github.com/Eyevinn/test-adserver</ClickThrough>
+            </VideoClicks>
+            <Duration>00:00:10</Duration>
+            <MediaFiles>
+              <MediaFile width="718" height="404" codec="H.264" delivery="progressive" type="application/x-mpegURL" bitrate="1300">https:/eyevinnlab-adnormalizer.minio-minio.auto.prod.osaas.io/adassets/AAA2FBBBB1232F2/2c804425-7bf5-4e6f-9822-891e8118209d/index.m3u8</MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>
