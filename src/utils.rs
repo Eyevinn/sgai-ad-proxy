@@ -214,11 +214,15 @@ pub fn calculate_expected_program_date_time_list(
 }
 
 pub fn is_media_segment(path: &str) -> bool {
-    path.contains(".ts") || path.contains(".cmf") || path.contains(".mp") || path.contains(".m4s")
+    path.ends_with(".ts")
+        || path.ends_with(".cmf")
+        || path.ends_with(".mp4")
+        || path.ends_with(".m4s")
+        || path.ends_with(".fmp4")
 }
 
 pub fn is_transcoded_media_segment(path: &str) -> bool {
-    path.contains(".m3u8")
+    path.ends_with(".m3u8")
 }
 
 pub fn is_fragmented_mp4_vod_media_playlist(playlist: &hls_m3u8::MediaPlaylist) -> bool {

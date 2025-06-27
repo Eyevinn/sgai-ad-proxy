@@ -56,11 +56,11 @@ enum RequestType {
 #[derive(Clone, Debug)]
 struct TestAsset {
     url: Url,
-    duration: f64,
+    duration: u64,
 }
 
 impl TestAsset {
-    fn new(url: Url, duration: f64) -> Self {
+    fn new(url: Url, duration: u64) -> Self {
         Self { url, duration }
     }
     
@@ -76,7 +76,7 @@ impl TestAsset {
 struct Ad {
     ad_id: Uuid,
     universal_ad_ids: Vec<UniversalAdId>,
-    duration: f64,
+    duration: u64,
     url: String,
     requested_at: chrono::DateTime<chrono::Local>,
     tracking: Vec<Tracking>,
@@ -217,7 +217,7 @@ struct CliArguments {
     default_ad_number: String,
 
     /// Replace raw MP4 assets with this test assets (it has to be a fragmented MP4 VoD **MEDIA** playlist)
-    /// e.g., https://s3.amazonaws.com/qa.jwplayer.com/hlsjs/muxed-fmp4/hls.m3u8
+    /// e.g., https://eyevinnlab-adtracking.minio-minio.auto.prod.osaas.io/tutorial/index.m3u8
     #[clap(long, env, verbatim_doc_comment, default_value_t = String::from(""))]
     test_asset_url: String,
 }
@@ -243,9 +243,9 @@ struct ServerConfig {
     interstitials_address: Url,
     master_playlist_path: String,
     insertion_mode: InsertionMode,
-    default_ad_duration: u64,
-    default_repeating_cycle: u64,
-    default_ad_number: u64,
+    target_ad_duration: u64,
+    target_repeating_cycle: u64,
+    target_ad_number: u64,
     test_asset: Option<TestAsset>,
 }
 
@@ -255,9 +255,9 @@ impl ServerConfig {
         interstitials_address: Url,
         master_playlist_path: String,
         insertion_mode: InsertionMode,
-        default_ad_duration: u64,
-        default_repeating_cycle: u64,
-        default_ad_number: u64,
+        target_ad_duration: u64,
+        target_repeating_cycle: u64,
+        target_ad_number: u64,
         test_asset: Option<TestAsset>,
     ) -> Self {
         Self {
@@ -265,9 +265,9 @@ impl ServerConfig {
             interstitials_address,
             master_playlist_path,
             insertion_mode,
-            default_ad_duration,
-            default_repeating_cycle,
-            default_ad_number,
+            target_ad_duration,
+            target_repeating_cycle,
+            target_ad_number,
             test_asset,
         }
     }
@@ -278,9 +278,9 @@ impl ServerConfig {
             "interstitials_address": self.interstitials_address.as_str(),
             "master_playlist_path": self.master_playlist_path.clone(),
             "insertion_mode": self.insertion_mode.to_str(),
-            "default_ad_duration": self.default_ad_duration,
-            "default_repeating_cycle": self.default_repeating_cycle,
-            "default_ad_number": self.default_ad_number,
+            "target_ad_duration": self.target_ad_duration,
+            "target_repeating_cycle": self.target_repeating_cycle,
+            "target_ad_number": self.target_ad_number,
             "test_asset": self.test_asset.as_ref().map(|asset| asset.to_json()).unwrap_or_else(|| object! {}),
         }
     }
@@ -325,7 +325,7 @@ fn get_request_type(req: &HttpRequest, config: &web::Data<ServerConfig>) -> Requ
         return RequestType::MasterPlayList;
     } else if is_media_segment(path) {
         return RequestType::Segment;
-    } else if path.contains(".m3u8") {
+    } else if path.ends_with(".m3u8") {
         return RequestType::MediaPlayList;
     } else {
         return RequestType::Other;
@@ -410,7 +410,7 @@ fn make_new_ad_from_creative(creative: &vast4_rs::Creative) -> Ad {
     Ad {
         ad_id,
         universal_ad_ids,
-        duration,
+        duration: duration as u64,
         url,
         requested_at: chrono::Local::now(),
         tracking: trackings,
@@ -450,7 +450,7 @@ fn to_tracking_json(tracking: &Tracking) -> json::JsonValue {
 
 }
 
-fn to_ad_asset_json(url: &str, ad: &Ad, start: f64) -> json::JsonValue {
+fn to_ad_asset_json(url: &str, ad: &Ad, start: u64) -> json::JsonValue {
     object! {
         "URI": url,
         "DURATION": ad.duration,
@@ -473,7 +473,7 @@ fn to_ad_asset_json(url: &str, ad: &Ad, start: f64) -> json::JsonValue {
     }
 }
 
-fn to_asset_list_json_string(assets: Vec<json::JsonValue>, duration: f64) -> String {
+fn to_asset_list_json_string(assets: Vec<json::JsonValue>, duration: u64) -> String {
     object! {
         "ASSETS": assets,
         "X-AD-CREATIVE-SIGNALING": object! {
@@ -495,7 +495,7 @@ fn wrap_into_assets(
     test_asset: &Option<TestAsset>,
     available_ads: web::Data<AvailableAds>,
 ) -> String {
-    let mut start_offset = 0.0;
+    let mut start_offset: u64 = 0;
     // Get all linears (regular MP4s) from the VAST
     let raw_assets = get_all_raw_creatives_from_vast(&vast)
         .iter()
@@ -645,9 +645,9 @@ fn insert_interstitials(
         };
 
         // Generate ad slots
-        let ad_duration = config.default_ad_duration;
-        let ad_every = config.default_repeating_cycle;
-        let ad_num = config.default_ad_number;
+        let ad_duration = config.target_ad_duration;
+        let ad_every = config.target_repeating_cycle;
+        let ad_num = config.target_ad_number;
         let fixed_ad_slots: Vec<AdSlot> = generate_static_ad_slots(ad_duration, ad_every, ad_num, ad_slots_start_date_time);
 
         // Save fixed ad slots to available slots
@@ -870,7 +870,7 @@ async fn handle_raw_asset_request(
         .ok_or_else(|| error::ErrorNotFound("Ad not found".to_string()))?;
 
     let segment = MediaSegment::builder()
-        .duration(Duration::from_secs_f64(linear.duration))
+        .duration(Duration::from_secs(linear.duration))
         .uri(linear.url.clone())
         .build()
         .unwrap();
@@ -878,7 +878,7 @@ async fn handle_raw_asset_request(
     // Wrap the MP4 in a media playlist
     let m3u8 = MediaPlaylist::builder()
         .media_sequence(0)
-        .target_duration(Duration::from_secs_f64(linear.duration))
+        .target_duration(Duration::from_secs(linear.duration))
         .segments(vec![segment])
         .has_end_list(true)
         .build()
@@ -1049,7 +1049,7 @@ fn parse_into_u64(value: &str, default: u64) -> u64 {
 
 fn parse_default_values(args: &CliArguments) -> (u64, u64, u64) {
     (
-        parse_into_u64(&args.default_ad_duration, 13),     // Default ad duration is 30 seconds
+        parse_into_u64(&args.default_ad_duration, 10),     // Default ad duration is 10 seconds
         parse_into_u64(&args.default_repeating_cycle, 30), // Default repeating cycle is 30 seconds
         parse_into_u64(&args.default_ad_number, 1000),     // Default ad number is 1000
     )
@@ -1071,7 +1071,7 @@ async fn parse_test_asset_url(config: Arc<ClientConfig>, path: &str) -> Option<T
         return None;
     }
     
-    let duration = m3u8.segments.iter().map(|(_, s)| s.duration.duration().as_secs_f64()).sum();    
+    let duration = m3u8.segments.iter().map(|(_, s)| s.duration.duration().as_secs()).sum();    
     Some(TestAsset::new(url, duration))
 }
 
@@ -1126,11 +1126,14 @@ async fn main() -> io::Result<()> {
         default_repeating_cycle,
         default_ad_number
     );
-    if args.ad_insertion_mode==InsertionMode::Static && default_repeating_cycle < default_ad_duration {
-        log::warn!("Ad duration is greater than the repeating cycle. This may cause issues for live streams.");
-    }
     if let Some(ref asset) = test_asset {
         log::info!("Test asset URL: {}, duration: {}s", asset.url, asset.duration);
+    }
+
+    let target_ad_duration = test_asset.as_ref()
+        .map_or(default_ad_duration, |asset| asset.duration as u64);
+    if args.ad_insertion_mode==InsertionMode::Static && default_repeating_cycle < target_ad_duration {
+        log::warn!("Ad duration is greater than the repeating cycle. This may cause issues for live streams.");
     }
 
     let available_slots = AvailableAdSlots::default();
@@ -1140,7 +1143,7 @@ async fn main() -> io::Result<()> {
         interstitials_address,
         playlist_path.to_string(),
         args.ad_insertion_mode,
-        default_ad_duration,
+        target_ad_duration,
         default_repeating_cycle,
         default_ad_number,
         test_asset,
