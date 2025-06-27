@@ -221,8 +221,13 @@ pub fn is_media_segment(path: &str) -> bool {
         || path.ends_with(".fmp4")
 }
 
-pub fn is_transcoded_media_segment(path: &str) -> bool {
+pub fn is_hls_playlist(path: &str) -> bool {
     path.ends_with(".m3u8")
+}
+
+pub fn is_transcoded_media_segment(path: &str) -> bool {
+    // Transcoded media segments typically forms a HLS VoD playlist.
+    is_hls_playlist(path)
 }
 
 pub fn is_fragmented_mp4_vod_media_playlist(playlist: &hls_m3u8::MediaPlaylist) -> bool {

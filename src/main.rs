@@ -5,8 +5,8 @@ use utils::{
     base_url, build_forward_url, calculate_expected_program_date_time_list, copy_headers,
     find_program_datetime_tag, get_all_raw_creatives_from_vast,
     get_all_transcoded_creatives_from_vast, get_duration_and_media_urls_and_tracking_events_from_linear,
-    get_header_value, get_universal_ad_ids_from_creative, get_query_param, is_media_segment, is_fragmented_mp4_vod_media_playlist,
-    make_program_date_time_tag, rustls_config,
+    get_header_value, get_universal_ad_ids_from_creative, get_query_param, is_media_segment, is_hls_playlist,
+    is_fragmented_mp4_vod_media_playlist, make_program_date_time_tag, rustls_config,
 };
 
 use actix_web::{error, middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
@@ -926,7 +926,10 @@ async fn handle_master_playlist(
         .get(new_url.as_str())
         .send()
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .inspect_err(|err| {
+            log::error!("Error fetching master playlist: {:?}", err);
+        })
+        .map_err(error::ErrorNotFound)?;
 
     // Save the user-defined query parameters for later use
     if let Some(query_params) = req.uri().query() {
@@ -939,8 +942,8 @@ async fn handle_master_playlist(
         }
     }
 
-    let payload = res.body().await.map_err(error::ErrorInternalServerError)?;
-    let m3u8 = std::str::from_utf8(&payload).map_err(error::ErrorInternalServerError)?;
+    let payload = res.body().await.map_err(error::ErrorBadRequest)?;
+    let m3u8 = std::str::from_utf8(&payload).map_err(error::ErrorBadRequest)?;
     let playlist = MasterPlaylist::try_from(m3u8).inspect_err(|err| {
         log::error!(
             "Error {:?} when parsing master playlist. Returning the original playlist.",
@@ -1055,9 +1058,38 @@ fn parse_default_values(args: &CliArguments) -> (u64, u64, u64) {
     )
 }
 
+async fn inspect_master_playlist(
+    config: Arc<ClientConfig>,
+    master_playlist_url: &Url,
+) -> Result<(), Error> {
+    if !is_hls_playlist(master_playlist_url.as_str()) {
+        return Err(error::ErrorBadRequest("Illegal master playlist URL".to_string()));
+    }
+
+    log::info!("Inspecting source stream at: {}", master_playlist_url);
+    let client = make_https_client(config);
+    let payload = client
+        .get(master_playlist_url.as_str())
+        .send()
+        .await
+        .map_err(error::ErrorBadRequest)?
+        .body()
+        .await
+        .map_err(error::ErrorBadRequest)?;
+ 
+    let m3u8 = std::str::from_utf8(&payload).map_err(error::ErrorBadRequest)?;
+    
+    // Try to parse the master playlist
+    MasterPlaylist::try_from(m3u8).map_err(|err| {
+        error::ErrorBadRequest(format!("Invalid master playlist: {}", err))
+    })?;
+
+    Ok(())
+}
+
 async fn parse_test_asset_url(config: Arc<ClientConfig>, path: &str) -> Option<TestAsset> {
-    if path.is_empty() {
-        log::warn!("Test asset URL is empty.");
+    if path.is_empty() || !is_hls_playlist(path) {
+        log::error!("Test asset URL is not a valid HLS playlist: {path}");
         return None;
     }
 
@@ -1096,6 +1128,11 @@ async fn main() -> io::Result<()> {
         Url::parse(&args.master_playlist_url).expect("Invalid master playlist URL");
 
     let client_tls_config = Arc::new(rustls_config());
+    // Inspect the master playlist to ensure it's valid
+    inspect_master_playlist(client_tls_config.clone(), &master_playlist_url)
+        .await
+        .expect("Failed to inspect master playlist");
+
     let test_asset = parse_test_asset_url(client_tls_config.clone(), &args.test_asset_url).await;
 
     // Forward URL is the base URL of the master playlist
@@ -1104,6 +1141,8 @@ async fn main() -> io::Result<()> {
 
     let listen_url = format!("http://{}:{}", &args.listen_addr, &args.listen_port);
     let listen_url = Url::parse(&listen_url).expect("Invalid listen address");
+    let proxied_playlist_path = listen_url.join(playlist_path)
+        .expect("Failed to join listen URL with playlist path");
 
     let interstitials_address = if args.interstitials_address.is_empty() {
         format!("http://localhost:{}", &args.listen_port)
@@ -1126,6 +1165,8 @@ async fn main() -> io::Result<()> {
         default_repeating_cycle,
         default_ad_number
     );
+    log::info!("Proxied stream will be available at: {proxied_playlist_path}");
+
     if let Some(ref asset) = test_asset {
         log::info!("Test asset URL: {}, duration: {}s", asset.url, asset.duration);
     }
