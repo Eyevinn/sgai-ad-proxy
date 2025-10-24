@@ -564,6 +564,7 @@ fn replace_absolute_url_with_relative_url(m3u8: &mut MasterPlaylist) {
             let absolute_media_playlist_url = Url::parse(&uri).expect("Invalid media playlist URI");
             let mut relative_url = absolute_media_playlist_url.path().to_string();
             if let Some(query) = absolute_media_playlist_url.query() {
+                relative_url.push('?');
                 relative_url.push_str(query);
             }
 
