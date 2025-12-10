@@ -29,14 +29,14 @@ hls_m3u8 = { version = "0.5.1", features = ["backtrace"] }
 vast4-rs = "1.0.6"
 mp4 = "0.14.0"
 
-awc = { version = "3.7.0", features = ["rustls-0_23"] }
+awc = { version = "3.8.1", features = ["rustls-0_23"] }
 actix = "0.13.5"
-actix-web = { version = "4.11.0", features = ["openssl"] }
-actix-http = "3.11.0"
+actix-web = { version = "4.12.0", features = ["openssl"] }
+actix-http = "3.11.2"
 actix-cors = "0.7.1"
 
-clap = { version = "4.5.38", features = ["derive", "env"] }
-chrono = { version = "0.4.41", features = ["serde"] }
+clap = { version = "4.5.53", features = ["derive", "env"] }
+chrono = { version = "0.4.42", features = ["serde"] }
 # derive_more = "1.0.0"
 dotenvy = "0.15"
 env_logger = "0.11"
@@ -49,23 +49,23 @@ futures-util = { version = "0.3.31", default-features = false, features = [
     "std",
 ] }
 log = "0.4"
-openssl = { version = "0.10.72", features = ["v110"] }
+openssl = { version = "0.10.75", features = ["v110"] }
 parking_lot = "0.12"
 pin-project-lite = "0.2.16"
 rand = "0.9"
 reqwest = { version = "0.12", features = ["json", "stream"] }
-rustls = "0.23.27"
+rustls = "0.23.35"
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0"
 time = "0.3"
-tokio = { version = "1.45.0", features = ["sync", "io-util"] }
-tokio-util = "0.7.15"
+tokio = { version = "1.48.0", features = ["sync", "io-util"] }
+tokio-util = "0.7.17"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
-tracing = "0.1.41"
+tracing = "0.1.43"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1.17", features = ["v4", "v7", "serde"] }
-url = "2.5.4"
+uuid = { version = "1.19", features = ["v4", "v7", "serde"] }
+url = "2.5.7"
 json = "0.12.4"
 dashmap = "6.1.0"
 lazy_static = "1.5.0"
