@@ -24,7 +24,7 @@ name = "mp4_parser"
 path = "src/mp4_parser.rs"
 
 [dependencies]
-dash-mpd = "0.18.3"
+dash-mpd = "0.19.1"
 hls_m3u8 = { version = "0.5.1", features = ["backtrace"] }
 vast4-rs = "1.0.6"
 mp4 = "0.14.0"
