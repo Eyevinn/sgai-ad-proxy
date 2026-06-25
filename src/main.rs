@@ -760,11 +760,48 @@ fn insert_interstitials(
     }
 }
 
+// Fetch the last EXT-X-PROGRAM-DATE-TIME from the first media playlist of the origin.
+// Returns the PDT of the end of the last segment (i.e. "stream now").
+// Falls back to Local::now() if unavailable.
+async fn fetch_stream_now(config: &ServerConfig, client: &Client) -> chrono::DateTime<chrono::Local> {
+    // Derive the media URL: forward_url + dir(master_playlist_path) + /v0/media.m3u8
+    // e.g. forward_url="https://origin/" + "loop/master.m3u8" -> "https://origin/loop/v0/media.m3u8"
+    let media_url = config.master_playlist_path.as_ref().and_then(|p| {
+        let dir = p.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        config.forward_url.join(&format!("{}/v0/media.m3u8", dir)).ok()
+    }).or_else(|| config.forward_url.join("v0/media.m3u8").ok());
+
+    if let Some(url) = media_url {
+        log::debug!("Fetching stream PDT from: {url}");
+        if let Ok(mut res) = client.get(url.as_str()).send().await {
+            if let Ok(payload) = res.body().await {
+                if let Ok(text) = std::str::from_utf8(&payload) {
+                    if let Ok(playlist) = MediaPlaylist::try_from(text) {
+                        // Use first segment's PDT as seed (avoid Local::now() which is wrong for lagging streams)
+                        let first_pdt = find_program_datetime_tag(&playlist);
+                        if let Some(seed) = first_pdt {
+                            let pdts = calculate_expected_program_date_time_list(&playlist.segments, seed);
+                            if let Some((last_pdt, last_dur)) = pdts.last() {
+                                let stream_end = *last_pdt + chrono::Duration::from_std(*last_dur).unwrap_or_default();
+                                log::info!("Stream end PDT (live edge): {stream_end}");
+                                return stream_end;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    log::warn!("Could not fetch stream PDT; falling back to wall clock");
+    chrono::Local::now()
+}
+
 // Take http get requests and parse the query string into commands
 async fn handle_commands(
     req: HttpRequest,
     config: web::Data<ServerConfig>,
     available_slots: web::Data<AvailableAdSlots>,
+    client: web::Data<Client>,
 ) -> Result<HttpResponse, Error> {
     if config.insertion_mode == InsertionMode::Static {
         return Ok(HttpResponse::BadRequest().body("Ad insertion is not supported in static mode."));
@@ -773,8 +810,8 @@ async fn handle_commands(
     let query = req.uri().query().unwrap_or_default();
     match InsertionCommand::from_query(query) {
         Ok(command) => {
-            let now = chrono::offset::Local::now();
-            let start_time = now + chrono::Duration::seconds(command.in_sec as i64);
+            let stream_now = fetch_stream_now(&config, &client).await;
+            let start_time = stream_now + chrono::Duration::seconds(command.in_sec as i64);
             let index = available_slots.0.len() as u64;
             let ad_slot = AdSlot {
                 id: Uuid::new_v4(),

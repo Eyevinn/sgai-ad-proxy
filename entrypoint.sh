@@ -17,8 +17,13 @@ else
   ORIGIN_ARG="${ORIGIN_URL}"
 fi
 
+# Allow full override of interstitials address (e.g. http:// for local dev)
+if [ -z "$INTERSTITIALS_ADDRESS" ]; then
+  INTERSTITIALS_ADDRESS="https://${OSC_HOSTNAME}"
+fi
+
 /app/ad_proxy 0.0.0.0 ${PORT:-8080} \
   ${VAST_ENDPOINT} \
   ${ORIGIN_ARG} \
   --ad-insertion-mode ${INSERTION_MODE:-static} \
-  --interstitials-address https://${OSC_HOSTNAME}
+  --interstitials-address ${INTERSTITIALS_ADDRESS}
