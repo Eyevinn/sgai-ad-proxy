@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
@@ -330,17 +330,19 @@ impl InsertionCommand {
 
 fn get_request_type(req: &HttpRequest, config: &web::Data<ServerConfig>) -> RequestType {
     let path = req.uri().path();
+    let semi_idx = path.find(';').or_else(|| path.find("%3B")).or_else(|| path.find("%3b"));
+    let path_base = semi_idx.map(|i| &path[..i]).unwrap_or(path);
 
     // In specific playlist mode, check for master playlist path
     if let Some(ref master_path) = config.master_playlist_path {
-        if path.contains(master_path.as_str()) {
+        if path_base.contains(master_path.as_str()) {
             return RequestType::MasterPlayList;
         }
     }
 
-    if is_media_segment(path) {
+    if is_media_segment(path_base) {
         return RequestType::Segment;
-    } else if path.ends_with(".m3u8") {
+    } else if path_base.ends_with(".m3u8") {
         // In origin host mode (master_playlist_path is None), return generic Playlist
         if config.master_playlist_path.is_none() {
             return RequestType::Playlist;
@@ -628,24 +630,18 @@ fn insert_interstitials(
     }
 
     if first_program_date_time.is_none() {
-        if !is_vod {
-            log::warn!("No program_date_time found in the live stream media playlist. Skipping interstitials.");
-            return;
-        }
-        log::warn!("No program_date_time found in the VOD stream media playlist. Using the server start time.");
+        // Synthesize PDT so the live edge tracks wall clock time.
+        // Use now() minus total window duration so the last segment's PDT ≈ now().
+        let window_ms: i64 = segments
+            .iter()
+            .map(|(_, s)| s.duration.duration().as_millis() as i64)
+            .sum();
+        let synthetic_start = chrono::Local::now() - chrono::Duration::milliseconds(window_ms);
+        log::warn!("No program_date_time found in the media playlist. Synthesizing from now() - window ({window_ms}ms).");
 
-        // Use server start time as the program_date_time for the first segment
         segments.find_first_mut().and_then(|first_segment| {
-            // Add to the playlist
-            first_segment.program_date_time = Some(make_program_date_time_tag(&START_TIME));
-
-            // Update the optional
-            first_program_date_time = Some(*START_TIME);
-
-            log::info!(
-                "Insert program_date_time: {:?} to first segment",
-                first_program_date_time
-            );
+            first_segment.program_date_time = Some(make_program_date_time_tag(&synthetic_start));
+            first_program_date_time = Some(synthetic_start);
             Some(first_segment)
         });
     }
@@ -688,6 +684,11 @@ fn insert_interstitials(
     // Or calculate the expected date time based on the previous segments
     let expected_program_date_time_list =
         calculate_expected_program_date_time_list(segments, first_program_date_time);
+
+    // Evict slots that have scrolled past the window start
+    if let Some((window_start, _)) = expected_program_date_time_list.first() {
+        available_slots.0.retain(|slot| slot.start_time >= *window_start);
+    }
     for (index, (program_date_time, duration)) in expected_program_date_time_list.iter().enumerate()
     {
         log::trace!(
@@ -703,16 +704,23 @@ fn insert_interstitials(
         }
     }
 
-    // Match the ad slots with the segments
+    // Match the ad slots with the segments.
+    // Track which slot UUIDs have already been matched to prevent duplicate DATERANGEs
+    // when channel-engine discontinuities cause multiple segments to share the same PDT range.
+    let mut matched_slot_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     let interstitials: Vec<_> = expected_program_date_time_list
         .iter()
         .enumerate()
         .filter_map(|(index, (program_date_time, duration))| {
             // Match the segment with the first possible ad slot
             ad_slots.iter().find_map(|ad_slot| {
+                if matched_slot_ids.contains(&ad_slot.id) {
+                    return None;
+                }
                 let expected_date_time = ad_slot.start_time;
                 let next_program_date_time = expected_date_time + *duration;
-                // The ad slot is between two segments
+                // Place the DATERANGE on the first segment whose PDT >= slot start,
+                // so it appears after the preceding segment in the manifest.
                 if program_date_time >= &expected_date_time
                     && program_date_time < &next_program_date_time
                 {
@@ -733,19 +741,26 @@ fn insert_interstitials(
                         )
                         .duration(Duration::from_secs_f32(slot_duration))
                         .insert_client_attribute("X-ASSET-LIST", Value::String(url.into()))
-                        .insert_client_attribute("X-SNAP", Value::String("IN,OUT".into()))
+                        .insert_client_attribute("X-SNAP", Value::String(if is_vod { "IN,OUT" } else { "IN" }.into()))
                         .insert_client_attribute("X-RESTRICT", Value::String("SKIP,JUMP".into()));
                     if is_vod {
-                        // Set the resume offset to 0 for VOD streams
                         date_range.insert_client_attribute(
                             "X-RESUME-OFFSET",
                             Value::Float(hls_m3u8::types::Float::new(0.0)),
+                        );
+                    } else {
+                        // For live streams, advance the primary by the ad duration so the player
+                        // resumes near the live edge instead of going into a seek loop.
+                        date_range.insert_client_attribute(
+                            "X-RESUME-OFFSET",
+                            Value::Float(hls_m3u8::types::Float::new(slot_duration)),
                         );
                     }
                     let date_range = date_range
                         .build()
                         .unwrap();
 
+                    matched_slot_ids.insert(ad_slot.id);
                     Some((index, Some(date_range)))
                 } else {
                     None
@@ -847,6 +862,7 @@ async fn handle_commands(
     available_slots: web::Data<AvailableAdSlots>,
     client: web::Data<Client>,
     last_seen_pdt: web::Data<AtomicI64>,
+    slot_counter: web::Data<AtomicU64>,
 ) -> Result<HttpResponse, Error> {
     if config.insertion_mode == InsertionMode::Static {
         return Ok(HttpResponse::BadRequest().body("Ad insertion is not supported in static mode."));
@@ -857,7 +873,7 @@ async fn handle_commands(
         Ok(command) => {
             let stream_now = fetch_stream_now(&config, &client, &last_seen_pdt).await;
             let start_time = stream_now + chrono::Duration::seconds(command.in_sec as i64);
-            let index = available_slots.0.len() as u64;
+            let index = slot_counter.fetch_add(1, Ordering::Relaxed);
             let ad_slot = AdSlot {
                 id: Uuid::new_v4(),
                 index,
@@ -919,7 +935,7 @@ async fn handle_interstitials(
 
     // If a test asset is configured, skip VAST entirely and serve it directly.
     if let Some(test_asset) = &config.test_asset {
-        let asset = to_ad_asset_json(&test_asset.url.as_str(), &Ad { duration: test_asset.duration, ..Default::default() }, test_asset.duration);
+        let asset = to_ad_asset_json(&test_asset.url.as_str(), &Ad { duration: test_asset.duration, ..Default::default() }, 0);
         let response = to_asset_list_json_string(vec![asset], test_asset.duration);
         log::info!("Serving test asset directly (no VAST): {response}");
         return Ok(HttpResponse::Ok()
@@ -1023,7 +1039,14 @@ async fn handle_media_stream(
             handle_playlist(req, available_slots, config, client, user_defined_query_params, last_seen_pdt).await
         }
         RequestType::Segment => handle_segment(req, config, client).await,
-        RequestType::Other => Ok(HttpResponse::NotFound().finish()),
+        // In origin host mode, proxy unrecognised paths (e.g. VTT dummy segments) through
+        RequestType::Other => {
+            if config.master_playlist_path.is_none() {
+                handle_segment(req, config, client).await
+            } else {
+                Ok(HttpResponse::NotFound().finish())
+            }
+        }
     }
 }
 
@@ -1193,8 +1216,9 @@ async fn handle_media_playlist_content(
     config: web::Data<ServerConfig>,
     last_seen_pdt: web::Data<AtomicI64>,
 ) -> Result<HttpResponse, Error> {
-    update_last_seen_pdt(&playlist, &last_seen_pdt);
     insert_interstitials(&mut playlist, &config, available_slots);
+    // Update after insertion so synthetic PDT (injected when stream has none) is visible
+    update_last_seen_pdt(&playlist, &last_seen_pdt);
     log::debug!("media playlist \n{playlist}");
 
     Ok(HttpResponse::Ok()
@@ -1352,7 +1376,7 @@ async fn parse_test_asset_url(config: Arc<ClientConfig>, path: &str) -> Option<T
     }
 
     let duration = m3u8.segments.iter().map(|(_, s)| s.duration.duration().as_secs()).sum();
-    // Use the original (master) URL so the player can pick its own variant.
+    // Use the master URL so the player can do ABR selection for the ad asset.
     Some(TestAsset::new(url, duration))
 }
 
@@ -1444,6 +1468,7 @@ async fn main() -> io::Result<()> {
     let available_slots = AvailableAdSlots::default();
     let available_ads = AvailableAds::default();
     let last_seen_pdt = web::Data::new(AtomicI64::new(0));
+    let slot_counter = web::Data::new(AtomicU64::new(0));
     let server_config = ServerConfig::new(
         forward_url,
         interstitials_address,
@@ -1470,6 +1495,7 @@ async fn main() -> io::Result<()> {
             .app_data(web::Data::new(ad_server_url.clone()))
             .app_data(web::Data::new(user_defined_query_params.clone()))
             .app_data(last_seen_pdt.clone())
+            .app_data(slot_counter.clone())
             .wrap(middleware::Logger::default())
             .wrap(cors)
             .route(COMMAND_PREFIX, web::get().to(handle_commands))

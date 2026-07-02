@@ -213,16 +213,27 @@ pub fn calculate_expected_program_date_time_list(
         .collect()
 }
 
+fn strip_path_params(path: &str) -> &str {
+    let idx = path.find(';')
+        .or_else(|| path.find("%3B"))
+        .or_else(|| path.find("%3b"));
+    match idx {
+        Some(i) => &path[..i],
+        None => path,
+    }
+}
+
 pub fn is_media_segment(path: &str) -> bool {
-    path.ends_with(".ts")
-        || path.ends_with(".cmf")
-        || path.ends_with(".mp4")
-        || path.ends_with(".m4s")
-        || path.ends_with(".fmp4")
+    let p = strip_path_params(path);
+    p.ends_with(".ts")
+        || p.ends_with(".cmf")
+        || p.ends_with(".mp4")
+        || p.ends_with(".m4s")
+        || p.ends_with(".fmp4")
 }
 
 pub fn is_hls_playlist(path: &str) -> bool {
-    path.ends_with(".m3u8")
+    strip_path_params(path).ends_with(".m3u8")
 }
 
 pub fn is_transcoded_media_segment(path: &str) -> bool {
