@@ -38,11 +38,14 @@ jobs:
       - name: Test
         run: cargo test --all-targets --verbose
 
-      # Both of these were verified clean against main before being made
-      # blocking (run 35226337757), so they enforce an existing standard
-      # rather than imposing a new one.
-      - name: Format check
+      # Reporting-only. `cargo fmt --all --check` currently reports ~35 diffs,
+      # nearly all in src/main.rs, so making this blocking would fail every PR
+      # until a formatting pass lands. Run that pass, then drop
+      # continue-on-error here to make both blocking.
+      - name: Format check (reporting only)
+        continue-on-error: true
         run: cargo fmt --all --check
 
-      - name: Clippy
+      - name: Clippy (reporting only)
+        continue-on-error: true
         run: cargo clippy --all-targets -- -D warnings

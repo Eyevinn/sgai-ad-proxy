@@ -83,6 +83,17 @@ This command will insert an ad break at 0 seconds to the live edge with a durati
 
 ### Prerequisites
 
+* **`protoc`** (protobuf compiler) — required to build. The `pssh-box` dependency pulls in
+  `prost-build`, whose build script shells out to `protoc`; without it `cargo build` fails with
+  ``Could not find `protoc` `` before compiling any of this crate's own code.
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install -y protobuf-compiler
+# macOS
+brew install protobuf
+```
+
 * An HLS streaming server
 
 ```bash
