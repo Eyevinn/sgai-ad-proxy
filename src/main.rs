@@ -804,6 +804,10 @@ fn build_preload_date_range<'a>(target: &ExtXDateRange<'a>) -> Option<ExtXDateRa
     // The target's CLASS is required so the player can resolve the target kind.
     let target_class = target.class().as_ref()?.to_string();
     let target_id = target.id().to_string();
+    // A preload DATERANGE MUST carry a DURATION or END-DATE (draft-pantos
+    // Appendix F). Injected interstitials always carry DURATION; mirror it onto
+    // the preload. If the target somehow lacks one, refuse to emit an illegal tag.
+    let duration = target.duration()?;
 
     let preload_id = format!("{target_id}-preload");
 
@@ -812,6 +816,7 @@ fn build_preload_date_range<'a>(target: &ExtXDateRange<'a>) -> Option<ExtXDateRa
         .id(preload_id)
         .class("com.apple.hls.preload")
         .start_date(start_date)
+        .duration(duration)
         .insert_client_attribute("X-URI", Value::String(x_uri.into()))
         .insert_client_attribute("X-TARGET-ID", Value::String(target_id.into()))
         .insert_client_attribute("X-TARGET-CLASS", Value::String(target_class.into()));
@@ -1609,6 +1614,8 @@ mod tests {
         assert!(line.contains("CLASS=\"com.apple.hls.preload\""), "line: {line}");
         // START-DATE consistent with the target.
         assert!(line.contains("START-DATE=\"2026-09-17T10:00:00.000Z\""), "line: {line}");
+        // A preload DATERANGE MUST carry DURATION (or END-DATE); it mirrors the target's.
+        assert!(line.contains("DURATION=30"), "line: {line}");
         // The three preload X- attributes.
         assert!(
             line.contains("X-URI=\"https://proxy.example/interstitials?_HLS_interstitial_id=ad-slot-1\""),
@@ -1641,6 +1648,9 @@ mod tests {
         let preload_pos = out.find("com.apple.hls.preload").unwrap();
         let interstitial_pos = out.find("com.apple.hls.interstitial").unwrap();
         assert!(preload_pos < interstitial_pos, "out: {out}");
+        // The preload line carries the target's DURATION, so it is spec-legal.
+        let preload_line = out.lines().find(|l| l.contains("com.apple.hls.preload")).unwrap();
+        assert!(preload_line.contains("DURATION=30"), "preload_line: {preload_line}");
         // Non-DATERANGE content is preserved.
         assert!(out.contains("#EXTINF:6.0,"), "out: {out}");
         assert!(out.contains("seg0.ts"), "out: {out}");
