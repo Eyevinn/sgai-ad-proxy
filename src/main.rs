@@ -807,7 +807,7 @@ fn build_preload_date_range<'a>(target: &ExtXDateRange<'a>) -> Option<ExtXDateRa
     // A preload DATERANGE MUST carry a DURATION or END-DATE (draft-pantos
     // Appendix F). Injected interstitials always carry DURATION; mirror it onto
     // the preload. If the target somehow lacks one, refuse to emit an illegal tag.
-    let duration = target.duration()?;
+    let duration = target.duration?;
 
     let preload_id = format!("{target_id}-preload");
 
