@@ -125,6 +125,13 @@ impl AdSlot {
     fn name(&self) -> String {
         format!("ad_slot{}", self.index)
     }
+
+    /// End of the break window: the slot stays live for the whole `duration`
+    /// after its `start_time` so that every concurrent viewer polling within
+    /// the break gets the ad, not just the first one.
+    fn expires_at(&self) -> chrono::DateTime<chrono::Local> {
+        self.start_time + chrono::Duration::seconds(self.duration as i64)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -685,9 +692,15 @@ fn insert_interstitials(
     let expected_program_date_time_list =
         calculate_expected_program_date_time_list(segments, first_program_date_time);
 
-    // Evict slots that have scrolled past the window start
+    // Evict slots only once their whole break window has scrolled past the
+    // window start. Retaining until `expires_at` (start_time + duration) keeps
+    // the break available to every concurrent viewer for the full `dur`,
+    // instead of dropping it the moment the first request scrolls the slot's
+    // start out of the DVR window.
     if let Some((window_start, _)) = expected_program_date_time_list.first() {
-        available_slots.0.retain(|slot| slot.start_time >= *window_start);
+        available_slots
+            .0
+            .retain(|slot| slot.expires_at() >= *window_start);
     }
     for (index, (program_date_time, duration)) in expected_program_date_time_list.iter().enumerate()
     {
@@ -1507,4 +1520,64 @@ async fn main() -> io::Result<()> {
     .workers(2)
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_slot(start: chrono::DateTime<chrono::Local>, duration: u64) -> AdSlot {
+        AdSlot {
+            id: Uuid::new_v4(),
+            index: 0,
+            start_time: start,
+            duration,
+            pod_num: 2,
+        }
+    }
+
+    // Issue #37: a command-triggered break must stay available for the whole
+    // `dur` window so concurrent viewers all get the ad, not just the first.
+    #[test]
+    fn slot_survives_eviction_while_break_is_active() {
+        let now = chrono::Local::now();
+        // A 15s break that started 5s ago is still active.
+        let slot = make_slot(now - chrono::Duration::seconds(5), 15);
+
+        let slots = AvailableAdSlots::default();
+        slots.0.insert(slot.clone());
+
+        // Simulate the eviction that runs on every media-playlist request:
+        // retain while the break window has not fully scrolled past `window_start`.
+        let window_start = now;
+        slots.0.retain(|s| s.expires_at() >= window_start);
+
+        // The slot representing the in-flight break must still be present so a
+        // second (concurrent) viewer polling now still receives the DATERANGE.
+        assert_eq!(slots.0.len(), 1, "active break was evicted too early");
+        assert!(slots.0.contains(&slot));
+    }
+
+    // Once the break has fully ended, the slot is evicted as before.
+    #[test]
+    fn slot_is_evicted_after_break_ends() {
+        let now = chrono::Local::now();
+        // A 15s break that started 30s ago has fully ended.
+        let slot = make_slot(now - chrono::Duration::seconds(30), 15);
+
+        let slots = AvailableAdSlots::default();
+        slots.0.insert(slot);
+
+        let window_start = now;
+        slots.0.retain(|s| s.expires_at() >= window_start);
+
+        assert_eq!(slots.0.len(), 0, "ended break should be evicted");
+    }
+
+    #[test]
+    fn expires_at_is_start_plus_duration() {
+        let start = chrono::Local::now();
+        let slot = make_slot(start, 15);
+        assert_eq!(slot.expires_at(), start + chrono::Duration::seconds(15));
+    }
 }
