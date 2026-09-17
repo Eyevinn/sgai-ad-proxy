@@ -894,6 +894,73 @@ fn insert_interstitials(
 
 }
 
+/// Build the companion `com.apple.hls.preload` DATERANGE for an injected
+/// interstitial DATERANGE, per Apple HLS Interstitials preload hinting.
+///
+/// The preload DATERANGE carries its own unique `ID` (target ID + "-preload"),
+/// a `START-DATE` equal to the target's START-DATE, and the three preload
+/// attributes `X-URI` (the resource to preload — the interstitial's
+/// `X-ASSET-URI` or `X-ASSET-LIST`), `X-TARGET-ID` (the target's ID) and
+/// `X-TARGET-CLASS` (the target's CLASS). Returns `None` if the target lacks
+/// the fields a legal preload DATERANGE requires (ID, START-DATE, a target
+/// CLASS, and an asset URI/list to preload).
+fn build_preload_date_range<'a>(target: &ExtXDateRange<'a>) -> Option<ExtXDateRange<'static>> {
+    // The resource to preload: prefer X-ASSET-URI, fall back to X-ASSET-LIST.
+    let x_uri = target
+        .client_attributes
+        .get("X-ASSET-URI")
+        .or_else(|| target.client_attributes.get("X-ASSET-LIST"))
+        .and_then(|v| match v {
+            Value::String(s) => Some(s.to_string()),
+            _ => None,
+        })?;
+
+    // START-DATE is mandatory for a legal preload DATERANGE.
+    let start_date = target.start_date().as_ref()?.to_string();
+    // The target's CLASS is required so the player can resolve the target kind.
+    let target_class = target.class().as_ref()?.to_string();
+    let target_id = target.id().to_string();
+
+    let preload_id = format!("{target_id}-preload");
+
+    let mut builder = ExtXDateRange::builder();
+    builder
+        .id(preload_id)
+        .class("com.apple.hls.preload")
+        .start_date(start_date)
+        .insert_client_attribute("X-URI", Value::String(x_uri.into()))
+        .insert_client_attribute("X-TARGET-ID", Value::String(target_id.into()))
+        .insert_client_attribute("X-TARGET-CLASS", Value::String(target_class.into()));
+
+    builder.build().ok().map(|dr| dr.into_owned())
+}
+
+/// Emit a `com.apple.hls.preload` companion DATERANGE line ahead of every
+/// injected interstitial DATERANGE line in a serialized media playlist.
+///
+/// This works on the rendered manifest string because a single `MediaSegment`
+/// can hold only one DATERANGE; the preload is a second, distinct DATERANGE
+/// that must sit alongside the interstitial it points at.
+fn inject_preload_date_ranges(playlist_str: &str) -> String {
+    let mut out = String::with_capacity(playlist_str.len() + 128);
+    for line in playlist_str.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#EXT-X-DATERANGE:")
+            && trimmed.contains("CLASS=\"com.apple.hls.interstitial\"")
+        {
+            if let Ok(target) = ExtXDateRange::try_from(trimmed) {
+                if let Some(preload) = build_preload_date_range(&target) {
+                    out.push_str(&preload.to_string());
+                    out.push('\n');
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 // Extract the live edge PDT from a media playlist and store it in the shared cache.
 fn update_last_seen_pdt(playlist: &MediaPlaylist, last_seen_pdt: &AtomicI64) {
     if let Some(seed) = find_program_datetime_tag(playlist) {
@@ -1335,11 +1402,14 @@ async fn handle_media_playlist_content(
     insert_interstitials(&mut playlist, &config, available_slots);
     // Update after insertion so synthetic PDT (injected when stream has none) is visible
     update_last_seen_pdt(&playlist, &last_seen_pdt);
-    log::debug!("media playlist \n{playlist}");
+    // Emit a com.apple.hls.preload companion DATERANGE ahead of each injected
+    // interstitial so players can preload the interstitial resource early.
+    let output = inject_preload_date_ranges(&playlist.to_string());
+    log::debug!("media playlist \n{output}");
 
     Ok(HttpResponse::Ok()
         .content_type(HLS_PLAYLIST_CONTENT_TYPE)
-        .body(playlist.to_string()))
+        .body(output))
 }
 
 async fn handle_playlist(
@@ -1925,5 +1995,70 @@ mod tests {
         let start = chrono::Local::now();
         let slot = make_slot(start, 15);
         assert_eq!(slot.expires_at(), start + chrono::Duration::seconds(15));
+    }
+
+    // ---- preload DATERANGE (issue #11) ----
+
+    // Issue #11: an injected interstitial DATERANGE must be accompanied by a
+    // companion `com.apple.hls.preload` DATERANGE that carries its own unique
+    // ID, a START-DATE, and the three X- preload attributes.
+    #[test]
+    fn preload_date_range_emitted_for_interstitial() {
+        let interstitial = ExtXDateRange::builder()
+            .id("ad-slot-1")
+            .class("com.apple.hls.interstitial")
+            .start_date("2026-09-17T10:00:00.000Z")
+            .duration(Duration::from_secs(30))
+            .insert_client_attribute(
+                "X-ASSET-LIST",
+                Value::String("https://proxy.example/interstitials?_HLS_interstitial_id=ad-slot-1".into()),
+            )
+            .build()
+            .unwrap();
+
+        let preload = build_preload_date_range(&interstitial).expect("preload should be built");
+        let line = preload.to_string();
+
+        // Own unique ID, distinct from the target's ID.
+        assert!(line.contains("ID=\"ad-slot-1-preload\""), "line: {line}");
+        // Preload CLASS.
+        assert!(line.contains("CLASS=\"com.apple.hls.preload\""), "line: {line}");
+        // START-DATE consistent with the target.
+        assert!(line.contains("START-DATE=\"2026-09-17T10:00:00.000Z\""), "line: {line}");
+        // The three preload X- attributes.
+        assert!(
+            line.contains("X-URI=\"https://proxy.example/interstitials?_HLS_interstitial_id=ad-slot-1\""),
+            "line: {line}"
+        );
+        assert!(line.contains("X-TARGET-ID=\"ad-slot-1\""), "line: {line}");
+        assert!(line.contains("X-TARGET-CLASS=\"com.apple.hls.interstitial\""), "line: {line}");
+    }
+
+    // The manifest post-processor emits exactly one preload line ahead of each
+    // interstitial DATERANGE line, and leaves other lines untouched.
+    #[test]
+    fn inject_preload_prepends_line_before_interstitial() {
+        let manifest = concat!(
+            "#EXTM3U\n",
+            "#EXT-X-VERSION:6\n",
+            "#EXT-X-PROGRAM-DATE-TIME:2026-09-17T10:00:00.000Z\n",
+            "#EXT-X-DATERANGE:ID=\"ad-slot-1\",CLASS=\"com.apple.hls.interstitial\",",
+            "START-DATE=\"2026-09-17T10:00:00.000Z\",DURATION=30,",
+            "X-ASSET-LIST=\"https://proxy.example/interstitials?id=1\"\n",
+            "#EXTINF:6.0,\n",
+            "seg0.ts\n",
+        );
+
+        let out = inject_preload_date_ranges(manifest);
+
+        // Exactly one preload line was added.
+        assert_eq!(out.matches("CLASS=\"com.apple.hls.preload\"").count(), 1, "out: {out}");
+        // It sits before the interstitial line.
+        let preload_pos = out.find("com.apple.hls.preload").unwrap();
+        let interstitial_pos = out.find("com.apple.hls.interstitial").unwrap();
+        assert!(preload_pos < interstitial_pos, "out: {out}");
+        // Non-DATERANGE content is preserved.
+        assert!(out.contains("#EXTINF:6.0,"), "out: {out}");
+        assert!(out.contains("seg0.ts"), "out: {out}");
     }
 }
