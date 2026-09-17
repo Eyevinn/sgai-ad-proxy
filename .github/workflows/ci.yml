@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      # Blocking: the crate must compile, all three bin targets included.
+      - name: Build
+        run: cargo build --all-targets --verbose
+
+      # Blocking. Note there are currently no tests in this repo, so this
+      # passes trivially — it exists so that tests added later are actually run.
+      - name: Test
+        run: cargo test --all-targets --verbose
+
+      # Reporting-only for now: the formatting and lint baseline has never been
+      # enforced here, so failing PRs on it from day one would block every change.
+      # Once a cleanup pass lands, drop continue-on-error to make these blocking.
+      - name: Format check (reporting only)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: Clippy (reporting only)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
