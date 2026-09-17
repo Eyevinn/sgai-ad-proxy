@@ -38,13 +38,11 @@ jobs:
       - name: Test
         run: cargo test --all-targets --verbose
 
-      # Reporting-only for now: the formatting and lint baseline has never been
-      # enforced here, so failing PRs on it from day one would block every change.
-      # Once a cleanup pass lands, drop continue-on-error to make these blocking.
-      - name: Format check (reporting only)
-        continue-on-error: true
+      # Both of these were verified clean against main before being made
+      # blocking (run 35226337757), so they enforce an existing standard
+      # rather than imposing a new one.
+      - name: Format check
         run: cargo fmt --all --check
 
-      - name: Clippy (reporting only)
-        continue-on-error: true
+      - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
