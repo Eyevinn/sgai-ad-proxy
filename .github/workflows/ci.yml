@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # pssh-box pulls in prost-build, whose build script requires protoc.
+      # Without this the build fails before compiling any of our own code.
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      # Blocking: the crate must compile, all three bin targets included.
+      - name: Build
+        run: cargo build --all-targets --verbose
+
+      # Blocking. Note there are currently no tests in this repo, so this
+      # passes trivially — it exists so that tests added later are actually run.
+      - name: Test
+        run: cargo test --all-targets --verbose
+
+      # Reporting-only. `cargo fmt --all --check` currently reports ~35 diffs,
+      # nearly all in src/main.rs, so making this blocking would fail every PR
+      # until a formatting pass lands. Run that pass, then drop
+      # continue-on-error here to make both blocking.
+      - name: Format check (reporting only)
+        continue-on-error: true
+        run: cargo fmt --all --check
+
+      - name: Clippy (reporting only)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
