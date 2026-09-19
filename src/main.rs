@@ -993,7 +993,7 @@ async fn handle_interstitials(
         .map_err(error::ErrorInternalServerError)?;
 
     let payload = res.body().await.map_err(error::ErrorInternalServerError)?;
-    let xml = std::str::from_utf8(&payload).unwrap();
+    let xml = std::str::from_utf8(&payload).map_err(error::ErrorInternalServerError)?;
     log::debug!("VAST response from ad server \n{:?}", xml);
     let vast: vast4_rs::Vast = vast4_rs::from_str(&xml)
         .inspect_err(|err| {
@@ -1332,19 +1332,32 @@ async fn handle_status(
         // Estimate minimum safe in_sec for dynamic /command: how far stream_now
         // lags behind wall clock.  Negative lag (stream_now in the future) is
         // clamped to 0 — any in_sec >= 0 is safe in that case.
-        let stream_now_millis = ts;
+        //
+        // `pdt_source: "real"` is correct here: `last_seen_pdt` is only written
+        // by `update_last_seen_pdt`, which stores a value only when a genuine
+        // EXT-X-PROGRAM-DATE-TIME tag is found in the manifest.  A non-zero `ts`
+        // therefore implies a real observed PDT, not a synthesized one.
         let now_millis = chrono::Local::now().timestamp_millis();
-        let lag_secs = ((now_millis - stream_now_millis) / 1000).max(0);
+        let lag_secs = ((now_millis - ts) / 1000).max(0);
         object! {
             "last_known_live_edge_pdt": live_edge,
             "pdt_source": "real",
             "min_safe_in_sec_for_dynamic": lag_secs,
         }
     } else {
+        // When last_seen_pdt == 0 the origin emits no EXT-X-PROGRAM-DATE-TIME.
+        // The manifest-build path synthesizes PDT as `now() - window_ms`, where
+        // window_ms is the sum of all segment durations (typically ~52 s).  That
+        // means stream_now is always ≈window_ms in the past, so any in_sec below
+        // window_ms/1000 (rounded up) will land in the past and be silently
+        // dropped by the /command guard.  We cannot read window_ms here — it is
+        // computed live from segment data inside the manifest handler and is not
+        // stored globally — so we report null rather than the misleading 0, which
+        // would imply that any in_sec is safe.
         object! {
             "last_known_live_edge_pdt": json::JsonValue::Null,
             "pdt_source": "synthesized_or_not_yet_seen",
-            "min_safe_in_sec_for_dynamic": 0,
+            "min_safe_in_sec_for_dynamic": json::JsonValue::Null,
         }
     };
 
