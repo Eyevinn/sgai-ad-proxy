@@ -873,6 +873,37 @@ async fn handle_commands(
         Ok(command) => {
             let stream_now = fetch_stream_now(&config, &client, &last_seen_pdt).await;
             let start_time = stream_now + chrono::Duration::seconds(command.in_sec as i64);
+
+            // Guard: reject slots whose computed start_time is already in the past.
+            // The manifest-build retain step evicts any slot with start_time < window_start
+            // (the first segment's PDT in the current live window).  Because the live window
+            // never reaches back before wall-clock now(), any slot with start_time < now()
+            // would be dropped on the next manifest build — silently, with no feedback to the
+            // caller.  Catching it here surfaces the failure as a structured 400.
+            let now = chrono::Local::now();
+            if start_time < now {
+                let min_in_sec = (now - stream_now).num_seconds().max(0) + 1;
+                let response = object! {
+                    status: "rejected",
+                    reason: "start_time is in the past and would be immediately evicted",
+                    computed_start_time: start_time.to_rfc3339(),
+                    stream_now: stream_now.to_rfc3339(),
+                    in_sec: command.in_sec,
+                    min_in_sec: min_in_sec,
+                };
+                log::warn!(
+                    "Rejected /command: start_time {} is in the past (stream_now={}, in_sec={}). \
+                     Minimum safe in_sec is {}.",
+                    start_time.to_rfc3339(),
+                    stream_now.to_rfc3339(),
+                    command.in_sec,
+                    min_in_sec,
+                );
+                return Ok(HttpResponse::BadRequest()
+                    .content_type(mime::APPLICATION_JSON)
+                    .body(response.pretty(2)));
+            }
+
             let index = slot_counter.fetch_add(1, Ordering::Relaxed);
             let ad_slot = AdSlot {
                 id: Uuid::new_v4(),
@@ -889,6 +920,7 @@ async fn handle_commands(
                 command: {
                     "index": index,
                     "in_sec": command.in_sec,
+                    "start_time": start_time.to_rfc3339(),
                     "duration": command.duration,
                     "pod_num": command.pod_num,
                 }
@@ -961,7 +993,7 @@ async fn handle_interstitials(
         .map_err(error::ErrorInternalServerError)?;
 
     let payload = res.body().await.map_err(error::ErrorInternalServerError)?;
-    let xml = std::str::from_utf8(&payload).unwrap();
+    let xml = std::str::from_utf8(&payload).map_err(error::ErrorInternalServerError)?;
     log::debug!("VAST response from ad server \n{:?}", xml);
     let vast: vast4_rs::Vast = vast4_rs::from_str(&xml)
         .inspect_err(|err| {
@@ -1286,11 +1318,54 @@ async fn handle_status(
     available_ads: web::Data<AvailableAds>,
     available_slots: web::Data<AvailableAdSlots>,
     user_defined_query_params: web::Data<UserDefinedQueryParams>,
+    last_seen_pdt: web::Data<AtomicI64>,
 ) -> Result<HttpResponse, Error> {
+    // Summarise what we know about the stream's current timeline.
+    // last_seen_pdt == 0 means no manifest has been served yet, or the origin
+    // emits no EXT-X-PROGRAM-DATE-TIME (PDT is synthesised on every manifest build
+    // and is not cached as a real value).
+    let ts = last_seen_pdt.load(Ordering::Relaxed);
+    let stream_info = if ts != 0 {
+        let live_edge = chrono::DateTime::from_timestamp_millis(ts)
+            .map(|dt| dt.with_timezone(&chrono::Local).to_rfc3339())
+            .unwrap_or_else(|| "unknown".to_string());
+        // Estimate minimum safe in_sec for dynamic /command: how far stream_now
+        // lags behind wall clock.  Negative lag (stream_now in the future) is
+        // clamped to 0 — any in_sec >= 0 is safe in that case.
+        //
+        // `pdt_source: "real"` is correct here: `last_seen_pdt` is only written
+        // by `update_last_seen_pdt`, which stores a value only when a genuine
+        // EXT-X-PROGRAM-DATE-TIME tag is found in the manifest.  A non-zero `ts`
+        // therefore implies a real observed PDT, not a synthesized one.
+        let now_millis = chrono::Local::now().timestamp_millis();
+        let lag_secs = ((now_millis - ts) / 1000).max(0);
+        object! {
+            "last_known_live_edge_pdt": live_edge,
+            "pdt_source": "real",
+            "min_safe_in_sec_for_dynamic": lag_secs,
+        }
+    } else {
+        // When last_seen_pdt == 0 the origin emits no EXT-X-PROGRAM-DATE-TIME.
+        // The manifest-build path synthesizes PDT as `now() - window_ms`, where
+        // window_ms is the sum of all segment durations (typically ~52 s).  That
+        // means stream_now is always ≈window_ms in the past, so any in_sec below
+        // window_ms/1000 (rounded up) will land in the past and be silently
+        // dropped by the /command guard.  We cannot read window_ms here — it is
+        // computed live from segment data inside the manifest handler and is not
+        // stored globally — so we report null rather than the misleading 0, which
+        // would imply that any in_sec is safe.
+        object! {
+            "last_known_live_edge_pdt": json::JsonValue::Null,
+            "pdt_source": "synthesized_or_not_yet_seen",
+            "min_safe_in_sec_for_dynamic": json::JsonValue::Null,
+        }
+    };
+
     // Return the status of the server
     let response = object! {
         "config": config.to_json(),
         "ad_server_url": ad_server_url.as_str(),
+        "stream": stream_info,
         "user_defined_query_params": user_defined_query_params.to_json(),
         "available_ads": available_ads.to_json(),
         "available_slots": available_slots.to_json(),
