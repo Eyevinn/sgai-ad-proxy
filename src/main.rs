@@ -229,6 +229,22 @@ struct CliArguments {
     /// e.g., https://eyevinnlab-adtracking.minio-minio.auto.prod.osaas.io/tutorial/index.m3u8
     #[clap(long, env, verbatim_doc_comment, default_value_t = String::from(""))]
     test_asset_url: String,
+
+    /// Seconds after the interstitial start before the skip button appears (0 = immediate).
+    /// Must be less than the interstitial duration or no button is shown.
+    /// When set, X-RESTRICT switches from "SKIP,JUMP" to "JUMP" and skip-control attributes are emitted.
+    #[clap(long, env, verbatim_doc_comment, default_value_t = String::from(""))]
+    skip_control_offset: String,
+
+    /// How long (seconds) the skip button remains visible; absent means the whole interstitial.
+    /// Must be >= 1 if provided.
+    #[clap(long, env, verbatim_doc_comment, default_value_t = String::from(""))]
+    skip_control_duration: String,
+
+    /// Localisation key for the skip-button label (ASCII letters, hyphens, underscores only).
+    /// e.g., "skip_ad"
+    #[clap(long, env, verbatim_doc_comment, default_value_t = String::from(""))]
+    skip_control_label_id: String,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq)]
@@ -256,6 +272,9 @@ struct ServerConfig {
     target_repeating_cycle: u64,
     target_ad_number: u64,
     test_asset: Option<TestAsset>,
+    skip_control_offset: Option<u64>,
+    skip_control_duration: Option<u64>,
+    skip_control_label_id: Option<String>,
 }
 
 impl ServerConfig {
@@ -268,6 +287,9 @@ impl ServerConfig {
         target_repeating_cycle: u64,
         target_ad_number: u64,
         test_asset: Option<TestAsset>,
+        skip_control_offset: Option<u64>,
+        skip_control_duration: Option<u64>,
+        skip_control_label_id: Option<String>,
     ) -> Self {
         Self {
             forward_url,
@@ -278,6 +300,9 @@ impl ServerConfig {
             target_repeating_cycle,
             target_ad_number,
             test_asset,
+            skip_control_offset,
+            skip_control_duration,
+            skip_control_label_id,
         }
     }
 
@@ -291,6 +316,9 @@ impl ServerConfig {
             "target_repeating_cycle": self.target_repeating_cycle,
             "target_ad_number": self.target_ad_number,
             "test_asset": self.test_asset.as_ref().map(|asset| asset.to_json()).unwrap_or_else(|| object! {}),
+            "skip_control_offset": self.skip_control_offset.map(|v| json::JsonValue::from(v)).unwrap_or(json::JsonValue::Null),
+            "skip_control_duration": self.skip_control_duration.map(|v| json::JsonValue::from(v)).unwrap_or(json::JsonValue::Null),
+            "skip_control_label_id": self.skip_control_label_id.as_deref().map(json::JsonValue::from).unwrap_or(json::JsonValue::Null),
         }
     }
 }
@@ -609,6 +637,48 @@ fn generate_static_ad_slots(ad_duration:u64, every:u64, number: u64, date_time: 
         .collect()
 }
 
+/// Resolved skip-control attributes for one interstitial slot.
+/// All fields correspond directly to HLS X-SKIP-CONTROL-* attributes.
+#[derive(Debug, Clone, PartialEq)]
+struct SkipControlAttrs {
+    /// X-SKIP-CONTROL-OFFSET (unquoted decimal-integer, seconds)
+    offset: u64,
+    /// X-SKIP-CONTROL-DURATION (unquoted decimal-integer, seconds); None = omit attribute
+    duration: Option<u64>,
+    /// X-SKIP-CONTROL-LABEL-ID (quoted string); None = omit attribute
+    label_id: Option<String>,
+}
+
+/// Validate the LABEL-ID value: ASCII letters, hyphens, underscores, non-empty.
+fn is_valid_label_id(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '_')
+}
+
+/// Resolve whether skip-control should be emitted for a slot with the given duration.
+/// Returns `Some(SkipControlAttrs)` when skip-control applies, `None` when it does not.
+/// Validation warnings are emitted here so the call site stays clean.
+fn resolve_skip_control(cfg: &ServerConfig, slot_duration: f32) -> Option<SkipControlAttrs> {
+    let offset = cfg.skip_control_offset?;
+    // OFFSET must be < slot_duration; if not, the button would never appear.
+    if offset as f32 >= slot_duration {
+        log::warn!(
+            "skip-control offset ({offset}s) >= slot duration ({slot_duration}s); \
+             button would never appear — skip-control suppressed for this slot"
+        );
+        return None;
+    }
+    let duration = cfg.skip_control_duration; // already validated (>=1) at startup
+    let label_id = cfg.skip_control_label_id.as_deref().and_then(|id| {
+        if is_valid_label_id(id) {
+            Some(id.to_owned())
+        } else {
+            log::warn!("skip-control label-id {id:?} contains invalid characters; label suppressed");
+            None
+        }
+    });
+    Some(SkipControlAttrs { offset, duration, label_id })
+}
+
 fn insert_interstitials(
     m3u8: &mut MediaPlaylist,
     config: &web::Data<ServerConfig>,
@@ -732,6 +802,8 @@ fn insert_interstitials(
                     );
                     let slot_duration = ad_slot.duration as f32;
                     
+                    let skip_ctrl = resolve_skip_control(config, slot_duration);
+
                     let mut date_range = ExtXDateRange::builder();
                     date_range
                         .id(ad_slot_name)
@@ -741,8 +813,20 @@ fn insert_interstitials(
                         )
                         .duration(Duration::from_secs_f32(slot_duration))
                         .insert_client_attribute("X-ASSET-LIST", Value::String(url.into()))
-                        .insert_client_attribute("X-SNAP", Value::String(if is_vod { "IN,OUT" } else { "IN" }.into()))
-                        .insert_client_attribute("X-RESTRICT", Value::String("SKIP,JUMP".into()));
+                        .insert_client_attribute("X-SNAP", Value::String(if is_vod { "IN,OUT" } else { "IN" }.into()));
+                    // When skip-control is active, drop "SKIP" from X-RESTRICT (contradictory).
+                    // Keep JUMP in both cases.
+                    if skip_ctrl.is_some() {
+                        date_range.insert_client_attribute(
+                            "X-RESTRICT",
+                            Value::String("JUMP".into()),
+                        );
+                    } else {
+                        date_range.insert_client_attribute(
+                            "X-RESTRICT",
+                            Value::String("SKIP,JUMP".into()),
+                        );
+                    }
                     if is_vod {
                         date_range.insert_client_attribute(
                             "X-RESUME-OFFSET",
@@ -755,6 +839,25 @@ fn insert_interstitials(
                             "X-RESUME-OFFSET",
                             Value::Float(hls_m3u8::types::Float::new(slot_duration)),
                         );
+                    }
+                    // Emit X-SKIP-CONTROL-* attributes when skip-control is configured and valid.
+                    if let Some(sc) = skip_ctrl {
+                        date_range.insert_client_attribute(
+                            "X-SKIP-CONTROL-OFFSET",
+                            Value::Float(hls_m3u8::types::Float::new(sc.offset as f32)),
+                        );
+                        if let Some(dur) = sc.duration {
+                            date_range.insert_client_attribute(
+                                "X-SKIP-CONTROL-DURATION",
+                                Value::Float(hls_m3u8::types::Float::new(dur as f32)),
+                            );
+                        }
+                        if let Some(label) = sc.label_id {
+                            date_range.insert_client_attribute(
+                                "X-SKIP-CONTROL-LABEL-ID",
+                                Value::String(label.into()),
+                            );
+                        }
                     }
                     let date_range = date_range
                         .build()
@@ -1465,6 +1568,37 @@ async fn main() -> io::Result<()> {
         log::warn!("Ad duration is greater than the repeating cycle. This may cause issues for live streams.");
     }
 
+    // Parse skip-control args; empty string means "not configured".
+    let skip_control_offset: Option<u64> = if args.skip_control_offset.is_empty() {
+        None
+    } else {
+        args.skip_control_offset.parse().ok()
+    };
+    let skip_control_duration: Option<u64> = if args.skip_control_duration.is_empty() {
+        None
+    } else {
+        match args.skip_control_duration.parse::<u64>() {
+            Ok(v) if v >= 1 => Some(v),
+            Ok(_) => {
+                log::warn!("skip-control-duration must be >= 1; ignoring configured value");
+                None
+            }
+            Err(_) => None,
+        }
+    };
+    let skip_control_label_id: Option<String> = if args.skip_control_label_id.is_empty() {
+        None
+    } else if is_valid_label_id(&args.skip_control_label_id) {
+        Some(args.skip_control_label_id.clone())
+    } else {
+        log::warn!(
+            "skip-control-label-id {:?} contains invalid characters (only ASCII letters, \
+             hyphens, underscores allowed); ignoring",
+            args.skip_control_label_id
+        );
+        None
+    };
+
     let available_slots = AvailableAdSlots::default();
     let available_ads = AvailableAds::default();
     let last_seen_pdt = web::Data::new(AtomicI64::new(0));
@@ -1478,6 +1612,9 @@ async fn main() -> io::Result<()> {
         default_repeating_cycle,
         default_ad_number,
         test_asset,
+        skip_control_offset,
+        skip_control_duration,
+        skip_control_label_id,
     );
     let user_defined_query_params = UserDefinedQueryParams::default();
 
@@ -1507,4 +1644,216 @@ async fn main() -> io::Result<()> {
     .workers(2)
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- helpers ----
+
+    fn dummy_config(
+        skip_control_offset: Option<u64>,
+        skip_control_duration: Option<u64>,
+        skip_control_label_id: Option<&str>,
+    ) -> ServerConfig {
+        ServerConfig {
+            forward_url: Url::parse("http://localhost/").unwrap(),
+            interstitials_address: Url::parse("http://localhost:8080/").unwrap(),
+            master_playlist_path: None,
+            insertion_mode: InsertionMode::Static,
+            target_ad_duration: 30,
+            target_repeating_cycle: 60,
+            target_ad_number: 10,
+            test_asset: None,
+            skip_control_offset,
+            skip_control_duration,
+            skip_control_label_id: skip_control_label_id.map(str::to_owned),
+        }
+    }
+
+    /// Build a minimal ExtXDateRange with the given skip-control config and return its
+    /// serialised string so tests can check exact attribute presence/format.
+    fn build_daterange(cfg: &ServerConfig, slot_duration: f32) -> String {
+        let sc = resolve_skip_control(cfg, slot_duration);
+
+        let mut b = ExtXDateRange::builder();
+        b.id("test-slot")
+            .start_date("2026-01-01T00:00:00.000Z");
+
+        if sc.is_some() {
+            b.insert_client_attribute("X-RESTRICT", Value::String("JUMP".into()));
+        } else {
+            b.insert_client_attribute("X-RESTRICT", Value::String("SKIP,JUMP".into()));
+        }
+
+        if let Some(ref sc) = sc {
+            b.insert_client_attribute(
+                "X-SKIP-CONTROL-OFFSET",
+                Value::Float(hls_m3u8::types::Float::new(sc.offset as f32)),
+            );
+            if let Some(dur) = sc.duration {
+                b.insert_client_attribute(
+                    "X-SKIP-CONTROL-DURATION",
+                    Value::Float(hls_m3u8::types::Float::new(dur as f32)),
+                );
+            }
+            if let Some(ref label) = sc.label_id {
+                b.insert_client_attribute(
+                    "X-SKIP-CONTROL-LABEL-ID",
+                    Value::String(label.clone().into()),
+                );
+            }
+        }
+
+        b.build().unwrap().to_string()
+    }
+
+    // ---- is_valid_label_id ----
+
+    #[test]
+    fn label_id_accepts_letters_hyphen_underscore() {
+        assert!(is_valid_label_id("skip_ad"));
+        assert!(is_valid_label_id("Skip-Ad"));
+        assert!(is_valid_label_id("a"));
+        assert!(is_valid_label_id("ABC_def-GHI"));
+    }
+
+    #[test]
+    fn label_id_rejects_empty_and_non_ascii() {
+        assert!(!is_valid_label_id(""));
+        assert!(!is_valid_label_id("skip ad"));   // space
+        assert!(!is_valid_label_id("skip.ad"));   // dot
+        assert!(!is_valid_label_id("skip123"));   // digits
+        assert!(!is_valid_label_id("skip\u{e9}")); // non-ASCII
+    }
+
+    // ---- resolve_skip_control ----
+
+    #[test]
+    fn no_skip_control_when_offset_absent() {
+        let cfg = dummy_config(None, None, None);
+        assert!(resolve_skip_control(&cfg, 30.0).is_none());
+    }
+
+    #[test]
+    fn no_skip_control_when_offset_equals_duration() {
+        let cfg = dummy_config(Some(30), None, None);
+        assert!(resolve_skip_control(&cfg, 30.0).is_none());
+    }
+
+    #[test]
+    fn no_skip_control_when_offset_exceeds_duration() {
+        let cfg = dummy_config(Some(40), None, None);
+        assert!(resolve_skip_control(&cfg, 30.0).is_none());
+    }
+
+    #[test]
+    fn skip_control_applies_when_offset_lt_duration() {
+        let cfg = dummy_config(Some(5), None, None);
+        let sc = resolve_skip_control(&cfg, 30.0).expect("should have attrs");
+        assert_eq!(sc.offset, 5);
+        assert!(sc.duration.is_none());
+        assert!(sc.label_id.is_none());
+    }
+
+    #[test]
+    fn skip_control_includes_duration_when_set() {
+        let cfg = dummy_config(Some(5), Some(10), None);
+        let sc = resolve_skip_control(&cfg, 30.0).unwrap();
+        assert_eq!(sc.duration, Some(10));
+    }
+
+    #[test]
+    fn skip_control_includes_label_when_valid() {
+        let cfg = dummy_config(Some(5), None, Some("skip_ad"));
+        let sc = resolve_skip_control(&cfg, 30.0).unwrap();
+        assert_eq!(sc.label_id.as_deref(), Some("skip_ad"));
+    }
+
+    #[test]
+    fn skip_control_omits_label_when_invalid() {
+        // digits in label-id → suppressed, but other attrs still emitted
+        let cfg = dummy_config(Some(5), None, Some("skip123"));
+        let sc = resolve_skip_control(&cfg, 30.0).unwrap();
+        assert!(sc.label_id.is_none());
+        assert_eq!(sc.offset, 5);
+    }
+
+    // ---- DATERANGE serialisation ----
+
+    #[test]
+    fn daterange_no_skip_control_has_skip_jump_restrict() {
+        let cfg = dummy_config(None, None, None);
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-RESTRICT=\"SKIP,JUMP\""), "got: {s}");
+        assert!(!s.contains("X-SKIP-CONTROL"), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_skip_control_offset_is_unquoted_integer() {
+        let cfg = dummy_config(Some(5), None, None);
+        let s = build_daterange(&cfg, 30.0);
+        // OFFSET must be unquoted (no surrounding quotes around the value)
+        assert!(s.contains("X-SKIP-CONTROL-OFFSET=5"), "got: {s}");
+        // Must NOT be quoted
+        assert!(!s.contains("X-SKIP-CONTROL-OFFSET=\"5\""), "got: {s}");
+        // X-RESTRICT must be JUMP only
+        assert!(s.contains("X-RESTRICT=\"JUMP\""), "got: {s}");
+        assert!(!s.contains("SKIP,JUMP"), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_skip_control_duration_is_unquoted_integer() {
+        let cfg = dummy_config(Some(5), Some(10), None);
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-SKIP-CONTROL-DURATION=10"), "got: {s}");
+        assert!(!s.contains("X-SKIP-CONTROL-DURATION=\"10\""), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_skip_control_label_id_is_quoted() {
+        let cfg = dummy_config(Some(5), None, Some("skip_ad"));
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-SKIP-CONTROL-LABEL-ID=\"skip_ad\""), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_full_skip_control_all_attrs_present() {
+        let cfg = dummy_config(Some(5), Some(10), Some("skip_ad"));
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-RESTRICT=\"JUMP\""), "got: {s}");
+        assert!(s.contains("X-SKIP-CONTROL-OFFSET=5"), "got: {s}");
+        assert!(s.contains("X-SKIP-CONTROL-DURATION=10"), "got: {s}");
+        assert!(s.contains("X-SKIP-CONTROL-LABEL-ID=\"skip_ad\""), "got: {s}");
+        assert!(!s.contains("SKIP,JUMP"), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_offset_at_boundary_suppresses_skip_control() {
+        // offset == duration → suppressed; SKIP,JUMP unchanged
+        let cfg = dummy_config(Some(30), Some(5), Some("skip_ad"));
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-RESTRICT=\"SKIP,JUMP\""), "got: {s}");
+        assert!(!s.contains("X-SKIP-CONTROL"), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_invalid_label_suppressed_but_other_attrs_emitted() {
+        // invalid label-id is suppressed but offset is still emitted
+        let cfg = dummy_config(Some(5), Some(8), Some("bad label!"));
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-SKIP-CONTROL-OFFSET=5"), "got: {s}");
+        assert!(s.contains("X-SKIP-CONTROL-DURATION=8"), "got: {s}");
+        assert!(!s.contains("X-SKIP-CONTROL-LABEL-ID"), "got: {s}");
+    }
+
+    #[test]
+    fn daterange_zero_offset_is_valid_immediate_skip() {
+        // offset=0 means immediate; 0 < 30 so it applies
+        let cfg = dummy_config(Some(0), None, None);
+        let s = build_daterange(&cfg, 30.0);
+        assert!(s.contains("X-SKIP-CONTROL-OFFSET=0"), "got: {s}");
+        assert!(s.contains("X-RESTRICT=\"JUMP\""), "got: {s}");
+    }
 }
