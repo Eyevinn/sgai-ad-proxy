@@ -472,12 +472,9 @@ fn make_new_ad_from_creative(creative: &vast4_rs::Creative) -> Ad {
     }
 }
 
-fn make_test_ad_from_creative(creative: &vast4_rs::Creative, test_asset: &TestAsset) -> Ad {
-    let mut ad = make_new_ad_from_creative(creative);
-    ad.url = test_asset.url.as_str().to_string();
-    ad.duration = test_asset.duration;
-
-    // Replace the http with https in urls
+// Normalize every tracking URL on an ad to https so beacons are not sent over
+// plaintext http (mixed-content) once the ad is served to the player.
+fn rewrite_tracking_to_https(ad: &mut Ad) {
     ad.tracking.iter_mut().for_each(|tracking| {
         tracking.urls.iter_mut().for_each(|url| {
             if url.starts_with("http://") {
@@ -485,6 +482,15 @@ fn make_test_ad_from_creative(creative: &vast4_rs::Creative, test_asset: &TestAs
             }
         });
     });
+}
+
+fn make_test_ad_from_creative(creative: &vast4_rs::Creative, test_asset: &TestAsset) -> Ad {
+    let mut ad = make_new_ad_from_creative(creative);
+    ad.url = test_asset.url.as_str().to_string();
+    ad.duration = test_asset.duration;
+
+    // Replace the http with https in tracking urls
+    rewrite_tracking_to_https(&mut ad);
 
     ad
 }
@@ -586,7 +592,9 @@ fn wrap_into_assets(
     let transcoded_assets = get_all_transcoded_creatives_from_vast(&vast)
         .iter()
         .map(|creative| {
-            let ad = make_new_ad_from_creative(creative);
+            let mut ad = make_new_ad_from_creative(creative);
+            // Normalize tracking beacons to https, matching the test-asset path.
+            rewrite_tracking_to_https(&mut ad);
             let id = ad.ad_id;
             log::info!("Processing transcoded asset {id}, tracking: {:?}", ad.tracking);
 
@@ -2070,5 +2078,48 @@ mod tests {
         // Non-DATERANGE content is preserved.
         assert!(out.contains("#EXTINF:6.0,"), "out: {out}");
         assert!(out.contains("seg0.ts"), "out: {out}");
+    }
+
+    // ---- rewrite_tracking_to_https (issue #29) ----
+
+    // Issue #29: tracking URLs on transcoded ads must be rewritten to https,
+    // the same treatment already applied on the test-asset path.
+    #[test]
+    fn rewrite_tracking_to_https_upgrades_http_urls() {
+        let mut ad = Ad {
+            tracking: vec![
+                Tracking {
+                    event: "impression".to_string(),
+                    offset: None,
+                    urls: vec![
+                        "http://tracker.example.com/imp".to_string(),
+                        "https://secure.example.com/already".to_string(),
+                    ],
+                },
+                Tracking {
+                    event: "complete".to_string(),
+                    offset: None,
+                    urls: vec!["http://tracker.example.com/complete".to_string()],
+                },
+            ],
+            ..Default::default()
+        };
+
+        rewrite_tracking_to_https(&mut ad);
+
+        assert_eq!(ad.tracking[0].urls[0], "https://tracker.example.com/imp");
+        // Already-https URLs are left untouched.
+        assert_eq!(ad.tracking[0].urls[1], "https://secure.example.com/already");
+        assert_eq!(
+            ad.tracking[1].urls[0],
+            "https://tracker.example.com/complete"
+        );
+        // No http:// remains anywhere.
+        assert!(
+            ad.tracking
+                .iter()
+                .flat_map(|t| t.urls.iter())
+                .all(|u| !u.starts_with("http://"))
+        );
     }
 }
