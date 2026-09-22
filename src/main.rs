@@ -534,8 +534,12 @@ fn to_ad_asset_json(url: &str, ad: &Ad, start: u64) -> json::JsonValue {
     }
 }
 
-fn to_asset_list_json_string(assets: Vec<json::JsonValue>, duration: u64) -> String {
-    object! {
+fn to_asset_list_json_string(
+    assets: Vec<json::JsonValue>,
+    duration: u64,
+    skip_control: Option<&SkipControlAttrs>,
+) -> String {
+    let mut obj = object! {
         "ASSETS": assets,
         "X-AD-CREATIVE-SIGNALING": object! {
             "version": 2,
@@ -544,8 +548,22 @@ fn to_asset_list_json_string(assets: Vec<json::JsonValue>, duration: u64) -> Str
                 "duration": duration,
             },
         },
+    };
+    // Emit SKIP-CONTROL only when configured; omit entirely so existing output is
+    // byte-for-byte unchanged when skip-control is not in use (spec: all members optional).
+    if let Some(sc) = skip_control {
+        let mut sc_obj = object! {
+            "OFFSET": sc.offset,
+        };
+        if let Some(dur) = sc.duration {
+            sc_obj["DURATION"] = dur.into();
+        }
+        if let Some(ref label) = sc.label_id {
+            sc_obj["LABEL-ID"] = label.as_str().into();
+        }
+        obj["SKIP-CONTROL"] = sc_obj;
     }
-    .pretty(2)
+    obj.pretty(2)
 }
 
 fn wrap_into_assets(
@@ -555,6 +573,7 @@ fn wrap_into_assets(
     user_id: &str,
     test_asset: &Option<TestAsset>,
     available_ads: web::Data<AvailableAds>,
+    config: &ServerConfig,
 ) -> String {
     let mut start_offset: u64 = 0;
     // Get all linears (regular MP4s) from the VAST
@@ -610,7 +629,9 @@ fn wrap_into_assets(
         .chain(transcoded_assets.into_iter())
         .collect::<Vec<_>>();
 
-    to_asset_list_json_string(assets, start_offset)
+    // Resolve skip-control using the total pod duration so OFFSET < total-duration is checked.
+    let skip_ctrl = resolve_skip_control(config, start_offset as f32);
+    to_asset_list_json_string(assets, start_offset, skip_ctrl.as_ref())
 }
 
 fn replace_absolute_url_with_relative_url(m3u8: &mut MasterPlaylist) {
@@ -1164,7 +1185,8 @@ async fn handle_interstitials(
     // If a test asset is configured, skip VAST entirely and serve it directly.
     if let Some(test_asset) = &config.test_asset {
         let asset = to_ad_asset_json(&test_asset.url.as_str(), &Ad { duration: test_asset.duration, ..Default::default() }, 0);
-        let response = to_asset_list_json_string(vec![asset], test_asset.duration);
+        let skip_ctrl = resolve_skip_control(&config, test_asset.duration as f32);
+        let response = to_asset_list_json_string(vec![asset], test_asset.duration, skip_ctrl.as_ref());
         log::info!("Serving test asset directly (no VAST): {response}");
         return Ok(HttpResponse::Ok()
             .content_type(mime::APPLICATION_JSON)
@@ -1198,7 +1220,7 @@ async fn handle_interstitials(
         // Return an empty VAST in case of parsing error
         .unwrap_or_default();
     // Wrap the VAST into JSON
-    let response = wrap_into_assets(vast, req_url, &interstitial_id, &user_id, &config.test_asset, available_ads);
+    let response = wrap_into_assets(vast, req_url, &interstitial_id, &user_id, &config.test_asset, available_ads, &config);
     log::info!("asset json reply \n{response}");
 
     Ok(HttpResponse::Ok()
